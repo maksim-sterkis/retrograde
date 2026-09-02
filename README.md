@@ -1,14 +1,12 @@
 # Retrograde
 
-Welcome to **Retrograde**, a high-speed, physics-based action game featuring a full campaign, built-in speedrunning leaderboards, and a custom level editor.
+Welcome to **Retrograde**, a high-speed, physics-based action game featuring a full campaign and built-in speedrunning leaderboards.
 
 ## Features
 
 - **25 Action-Packed Levels**: Master precise movement and physics to beat the campaign.
 - **Speedrun & Casual Modes**: Compete for the fastest times on Individual Levels (ILs) or full game runs (RTA & IGT tracked).
-- **Global Leaderboards**: Built-in cloud saving and leaderboard integration using a secure Google Apps Script backend.
-- **In-Game Terminal**: Access advanced tools and debugging right from the main menu by pressing `T`.
-- **Custom Level Editor**: Create, share, and play your own custom levels.
+- **Global Leaderboards**: Built-in cloud saving and leaderboard integration so you can track your times against the world.
 
 ## Cloud Saves & Leaderboard
 
