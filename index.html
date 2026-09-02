@@ -540,7 +540,12 @@ const MusicSystem = {
         this.ctx = audioCtx;
         this.musicGain = this.ctx.createGain();
         this.updateVolume();
-        this.musicGain.connect(this.ctx.destination);
+        
+        if (typeof AudioSystem !== 'undefined' && AudioSystem.masterGain) {
+            this.musicGain.connect(AudioSystem.masterGain);
+        } else {
+            this.musicGain.connect(this.ctx.destination);
+        }
     },
 
     updateVolume: function() {
