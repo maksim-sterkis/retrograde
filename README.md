@@ -22,16 +22,6 @@ Retrograde features a seamless cloud-save system that doesn't rely on third-part
 
 Retrograde is entirely client-side JavaScript, meaning you can play it by simply opening `index.html` in any modern web browser.
 
-### Packaging to a Single HTML File
-
-If you want to bundle the entire game (all JS and CSS) into a single, portable HTML file, run the included build command:
-
-```javascript
-const fs = require('fs');
-const path = require('path');
-// ... (script bundled dynamically into one-html/index.html)
-```
-
 ## Credits
 
 Developed by Author.
