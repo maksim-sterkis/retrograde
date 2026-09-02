@@ -844,6 +844,253 @@ const MusicSystem = {
 
 </script>
     <script>
+// js/database.js
+
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycby0nrHYsi_bvzDd5Wmw5uld_lzuFpyEv8o8O2D1iBFY3kEz1SCQVt5dzRoBzM-DGvj-/exec"; 
+const CACHE_LIFETIME = 10 * 60 * 1000; // 10 minutes
+
+let leaderboardCache = {
+    speedrun: null,
+    casual: null,
+    il: {}, // il[levelIndex]
+    lastFetchTime: 0
+};
+
+class Database {
+    constructor() {
+        this.queue = [];
+        this.isProcessing = false;
+        this.cache = leaderboardCache;
+    }
+
+    generateSecurePlayerId(username) {
+        // A simple obfuscation: salt + caesar cipher + base64
+        const salt = "retr0_";
+        let str = salt + username + "_" + Date.now();
+        let shifted = "";
+        for (let i = 0; i < str.length; i++) {
+            shifted += String.fromCharCode(str.charCodeAt(i) + 5);
+        }
+        return btoa(shifted);
+    }
+
+    async enqueue(action, data) {
+        this.queue.push({ action, data });
+        this.processQueue();
+    }
+
+    async processQueue() {
+        if (this.isProcessing || this.queue.length === 0) return;
+        this.isProcessing = true;
+
+        while (this.queue.length > 0) {
+            const req = this.queue.shift();
+            try {
+                if (req.action === 'submitRun') {
+                    await this.sendPost(req.data);
+                } else if (req.action === 'updateProfile') {
+                    await this.sendPost(req.data);
+                } else if (req.action === 'deleteProfile') {
+                    await this.sendPost({ type: 'deleteProfile', ...req.data });
+                }
+            } catch (err) {
+                console.error("Network queue error:", err);
+            }
+            // slight delay to not bomb the server if many queued
+            await new Promise(r => setTimeout(r, 1000));
+        }
+
+        this.isProcessing = false;
+    }
+
+    async sendPost(data) {
+        if (SCRIPT_URL === "YOUR_GOOGLE_SCRIPT_URL_HERE") return;
+
+        try {
+            await fetch(SCRIPT_URL, {
+                method: 'POST',
+                mode: 'no-cors',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data)
+            });
+        } catch (e) {
+            console.error("Post failed:", e);
+        }
+    }
+
+    submitRun(category, rta, igt, levelIndex = null) {
+        if (!saveData || saveData.isAnonymous || !saveData.playerId) return;
+
+        if (typeof rta !== 'number' || typeof igt !== 'number' || isNaN(rta) || isNaN(igt) || rta <= 0 || igt <= 0) {
+            console.warn("Invalid times for submitRun:", rta, igt);
+            return;
+        }
+
+        if (category !== 'IL' && category !== 'Speedrun' && category !== 'Casual') {
+            console.warn("Invalid category for submitRun:", category);
+            return;
+        }
+
+        if (category === 'IL' && (levelIndex === null || levelIndex < 0 || levelIndex > 24)) {
+            console.warn("Invalid levelIndex for IL submitRun:", levelIndex);
+            return;
+        }
+
+        this.enqueue('submitRun', {
+            type: 'submitRun',
+            playerId: saveData.playerId,
+            username: saveData.username,
+            category: category,
+            level: levelIndex !== null ? (levelIndex + 1).toString() : "",
+            rta: rta,
+            igt: igt
+        });
+    }
+
+    updateProfile(username, playerId) {
+        if (!username || !playerId) return;
+        this.enqueue('updateProfile', {
+            type: 'updateProfile',
+            playerId: playerId,
+            username: username
+        });
+    }
+
+    async deleteProfile(playerId) {
+        await this.enqueue('deleteProfile', { playerId });
+    }
+
+    async testConnection() {
+        if (SCRIPT_URL === "YOUR_GOOGLE_SCRIPT_URL_HERE") return "NOT CONFIGURED";
+        try {
+            const url = `${SCRIPT_URL}?category=Speedrun&level=`;
+            const response = await fetch(url, { method: 'GET' });
+            if (response.ok) return "CONNECTED";
+            return `ERROR`;
+        } catch (e) {
+            return "ERROR";
+        }
+    }
+
+    async fetchLeaderboard(category, levelIndex = null, forceRefresh = false) {
+        if (SCRIPT_URL === "YOUR_GOOGLE_SCRIPT_URL_HERE") return null;
+
+        const now = Date.now();
+        let cacheKey = category;
+        if (category === 'IL' && levelIndex !== null) {
+            cacheKey = `IL_${levelIndex}`;
+        }
+
+        if (!forceRefresh && this.cache.lastFetchTime > 0 && (now - this.cache.lastFetchTime < CACHE_LIFETIME)) {
+            if (category === 'IL' && this.cache.il[levelIndex]) {
+                return this.cache.il[levelIndex];
+            } else if (category === 'Speedrun' && this.cache.speedrun) {
+                return this.cache.speedrun;
+            } else if (category === 'Casual' && this.cache.casual) {
+                return this.cache.casual;
+            }
+        }
+
+        try {
+            let url = `${SCRIPT_URL}?category=${encodeURIComponent(category)}`;
+            if (levelIndex !== null) url += `&level=${levelIndex + 1}`;
+
+            const res = await fetch(url);
+            if (!res.ok) throw new Error("Network response was not ok");
+            const data = await res.json();
+
+            // Update Cache
+            this.cache.lastFetchTime = now;
+            if (category === 'IL') {
+                this.cache.il[levelIndex] = data;
+            } else if (category === 'Speedrun') {
+                this.cache.speedrun = data;
+            } else if (category === 'Casual') {
+                this.cache.casual = data;
+            }
+            return data;
+        } catch (e) {
+            console.error("Fetch leaderboard failed:", e);
+            return null;
+        }
+    }
+
+    forceSync() {
+        this.processQueue();
+        this.cache.lastFetchTime = 0;
+        this.cache.speedrun = null;
+        this.cache.casual = null;
+        this.cache.il = {};
+        console.log("Database cache cleared, queue forced to process.");
+    }
+
+    pushAllLocalData() {
+        if (typeof saveData === 'undefined' || !saveData || saveData.isAnonymous || !saveData.playerId) {
+            console.warn("Cannot push data: anonymous or no save data.");
+            return;
+        }
+
+        // Push all ILs
+        if (saveData.bestLevels) {
+            for (let i = 0; i < saveData.bestLevels.length; i++) {
+                if (saveData.bestLevels[i] !== null && saveData.bestLevels[i] !== undefined) {
+                    this.submitRun('IL', saveData.bestLevels[i], saveData.bestLevels[i], i);
+                }
+            }
+        }
+
+        // Push Speedrun
+        if (saveData.bestRTA !== null && saveData.bestIGT !== null && saveData.bestRTA !== undefined) {
+            this.submitRun('Speedrun', saveData.bestRTA, saveData.bestIGT);
+        }
+
+        // Push Casual
+        if (saveData.casualRTA !== null && saveData.casualIGT !== null && saveData.casualRTA !== undefined && saveData.casualRTA > 0) {
+            this.submitRun('Casual', saveData.casualRTA, saveData.casualIGT);
+        }
+
+        this.forceSync();
+    }
+
+    async fetchProfile(playerId) {
+        if (!playerId || playerId.length < 10) return { error: "Invalid Player ID" };
+        if (SCRIPT_URL === "YOUR_GOOGLE_SCRIPT_URL_HERE") return { error: "Not configured" };
+
+        try {
+            const url = `${SCRIPT_URL}?action=getProfile&playerId=${encodeURIComponent(playerId)}`;
+            const res = await fetch(url);
+            if (!res.ok) throw new Error("Network response was not ok");
+            const data = await res.json();
+            return data;
+        } catch (e) {
+            console.error("Fetch profile failed:", e);
+            return { error: "Network Error" };
+        }
+    }
+
+    async checkUsername(username) {
+        if (!username || username.trim().length === 0) return { error: "Invalid username" };
+        if (SCRIPT_URL === "YOUR_GOOGLE_SCRIPT_URL_HERE") return { error: "Not configured" };
+
+        try {
+            const url = `${SCRIPT_URL}?action=checkUsername&username=${encodeURIComponent(username)}`;
+            const res = await fetch(url);
+            if (!res.ok) throw new Error("Network response was not ok");
+            const data = await res.json();
+            return data;
+        } catch (e) {
+            console.error("Check username failed:", e);
+            return { error: "Network Error" };
+        }
+    }
+}
+
+const db = new Database();
+
+</script>
+    <script>
 let saveData = {
     bestLevels: [],
     bestRTASplits: [],
@@ -858,7 +1105,10 @@ let saveData = {
     casualIGT: 0,
     visualEffects: 'high',
     showTimer: true,
-    showFPS: false
+    showFPS: false,
+    username: null,
+    playerId: null,
+    isAnonymous: false
 };
 
 let generatedSaveCode = "";
@@ -946,6 +1196,18 @@ function loadSaveData() {
                     saveData.showFPS = parsed.showFPS;
                 }
 
+                if (parsed.username !== undefined) {
+                    saveData.username = parsed.username;
+                }
+
+                if (parsed.playerId !== undefined) {
+                    saveData.playerId = parsed.playerId;
+                }
+
+                if (parsed.isAnonymous !== undefined) {
+                    saveData.isAnonymous = parsed.isAnonymous;
+                }
+
                 if (parsed.bestLevels.length === levels.length) {
                     if (parsed.bestRTA !== undefined) saveData.bestRTA = parsed.bestRTA;
                     if (parsed.bestIGT !== undefined) saveData.bestIGT = parsed.bestIGT;
@@ -964,6 +1226,12 @@ function loadSaveData() {
                 }
             }
         }
+        if (saveData.username || saveData.isAnonymous) {
+            if (typeof menuScreen !== 'undefined' && menuScreen === 'startup') {
+                menuScreen = 'main';
+            }
+        }
+        
         MAX_PARTICLES = saveData.visualEffects === 'high' ? 800 : (saveData.visualEffects === 'medium' ? 400 : 200);
     } catch (e) { console.error("Save load failed", e); }
 }
@@ -1083,6 +1351,7 @@ function parseSaveCode(code) {
 
 </script>
     <script>
+// TUTORIAL LEVEL
 const tutorialLevel = {
     isTutorial: true,
     theme: { bg: '#050505', l1: '#0a0f14', l2: '#0f171e', obj: '#334155', light: '180, 220, 255', parallaxType: 'mountains' },
@@ -1108,6 +1377,7 @@ const tutorialLevel = {
 };
 
 const levels = [
+    // LEVEL 1
     {
         theme: { bg: '#050505', l1: '#0a0f14', l2: '#0f171e', obj: '#334155', light: '180, 220, 255', parallaxType: 'mountains' },
         width: 4000, height: 720,
@@ -1124,6 +1394,7 @@ const levels = [
             { x: 3700, y: 680, w: 200, h: 50, isWall: true }
         ]
     },
+    // LEVEL 2
     {
         theme: { bg: '#030405', l1: '#080b0e', l2: '#0d1217', obj: '#2a3648', light: '150, 200, 255', parallaxType: 'machinery' },
         width: 1280, height: 3000,
@@ -1141,6 +1412,7 @@ const levels = [
             { x: 565, y: 2960, w: 150, h: 50, isWall: true }
         ]
     },
+    // LEVEL 3
     {
         theme: { bg: '#040506', l1: '#090c0f', l2: '#0e1318', obj: '#253040', light: '220, 240, 255', parallaxType: 'caves' },
         width: 3000, height: 2000,
@@ -1159,6 +1431,7 @@ const levels = [
             { x: 2100, y: 1750, w: 100, h: 250, isWall: true }
         ]
     },
+    // LEVEL 4
     {
         theme: { bg: '#020202', l1: '#080808', l2: '#101010', obj: '#222222', light: '255, 255, 255', parallaxType: 'mountains' },
         width: 4000, height: 800,
@@ -1177,6 +1450,7 @@ const levels = [
             { x: 3300, y: 300, w: 200, h: 500, isWall: true }
         ]
     },
+    // LEVEL 5
     {
         theme: { bg: '#10151a', l1: '#151b22', l2: '#1e2630', obj: '#4a5b6e', light: '255, 180, 100', parallaxType: 'lightCaves' },
         width: 6000, height: 1000,
@@ -1197,6 +1471,7 @@ const levels = [
             { x: 5000, y: 300, w: 100, h: 200, isWall: true }
         ]
     },
+    // LEVEL 6
     {
         theme: { bg: '#030405', l1: '#080b0e', l2: '#0d1217', obj: '#2a3648', light: '150, 200, 255', parallaxType: 'machinery' },
         width: 1280, height: 4000,
@@ -1217,6 +1492,7 @@ const levels = [
             { x: 565, y: 3960, w: 150, h: 50, isWall: true }
         ]
     },
+    // LEVEL 7
     {
         theme: { bg: '#040506', l1: '#090c0f', l2: '#0e1318', obj: '#253040', light: '255, 255, 255', parallaxType: 'caves' },
         zeroGravity: true,
@@ -1244,6 +1520,7 @@ const levels = [
             { x: 2050, y: 3200, w: 200, h: 150, isWall: true, texture: 'scaffold' }
         ]
     },
+    // LEVEL 8
     {
         theme: { bg: '#040506', l1: '#090c0f', l2: '#0e1318', obj: '#253040', light: '255, 255, 255', parallaxType: 'caves' },
         width: 5000, height: 600,
@@ -1264,6 +1541,7 @@ const levels = [
             { x: 4700, y: 300, w: 200, h: 100, isWall: true, texture: 'asteroid' }
         ]
     },
+    // LEVEL 9
     {
         theme: { bg: '#040506', l1: '#090c0f', l2: '#0e1318', obj: '#253040', light: '220, 240, 255', parallaxType: 'caves' },
         width: 2500, height: 4000,
@@ -1290,6 +1568,7 @@ const levels = [
             { x: 2100, y: 3800, w: 200, h: 150, isWall: true }
         ]
     },
+    // LEVEL 10
     {
         theme: { bg: '#000000', l1: '#ffffff', l2: '#aaaaaa', obj: '#111111', light: '255, 255, 255', parallaxType: 'stars' },
         width: 3000, height: 2000,
@@ -1338,6 +1617,7 @@ const levels = [
             { x: 2300, y: 600, w: 35, h: 35, isWall: true, texture: 'asteroid' }
         ]
     },
+    // LEVEL 11
     {
         theme: { bg: '#020304', l1: '#070a0e', l2: '#0b1016', obj: '#1a2230', light: '0, 255, 200', parallaxType: 'machinery' },
         width: 3000, height: 6000,
@@ -1365,6 +1645,7 @@ const levels = [
             { x: 1400, y: 5900, w: 140, h: 50, isWall: true }
         ]
     },
+    // LEVEL 12
     {
         theme: { bg: '#040506', l1: '#090c0f', l2: '#0e1318', obj: '#253040', light: '50, 255, 100', parallaxType: 'caves' },
         zeroGravity: true,
@@ -1419,6 +1700,7 @@ const levels = [
             { x: 2500, y: 50, w: 80, h: 100, isWall: true, texture: 'asteroid' }
         ]
     },
+    // LEVEL 13
     {
         theme: { bg: '#080500', l1: '#120a00', l2: '#1c1000', obj: '#a88d6c', light: '255, 150, 50', parallaxType: 'lightCaves' },
         zeroGravity: true,
@@ -1443,8 +1725,8 @@ const levels = [
             { x: 1400, y: 2100, w: 200, h: 50, isWall: true }
         ]
     },
+    // LEVEL 14
     {
-        // LEVEL 14: The Extruded Sweep (Pure Geometry)
         theme: { bg: '#080500', l1: '#120a00', l2: '#1c1000', obj: '#a88d6c', light: '255, 150, 50', parallaxType: 'lightCaves' },
         zeroGravity: true,
         width: 2500, height: 2500,
@@ -1484,8 +1766,8 @@ const levels = [
             { vertices: [{ x: 1000, y: 1700 }, { x: 1400, y: 1700 }, { x: 1400, y: 800 }, { x: 1000, y: 800 }], isWall: true }
         ]
     },
+    // LEVEL 15
     {
-        // LEVEL 15: Moving Platform Demo (The Blast Doors)
         theme: { bg: '#050a10', l1: '#0a121e', l2: '#101a2a', obj: '#2a3b50', light: '100, 255, 100', parallaxType: 'machinery' },
         width: 2000, height: 800,
         startX: 175, startY: 535,
@@ -1518,8 +1800,8 @@ const levels = [
             }
         ]
     },
+    // LEVEL 16
     {
-        // LEVEL 16: Wind Tunnel Demo
         theme: { bg: '#010508', l1: '#05101a', l2: '#0a1a2a', obj: '#1a2a3a', light: '0, 255, 200', parallaxType: 'machinery' },
         width: 3000, height: 1500,
         startX: 200, startY: 1330,
@@ -1562,8 +1844,8 @@ const levels = [
             }
         ]
     },
+    // LEVEL 17
     {
-        // LEVEL 17: The Gravity Chambers
         theme: { bg: '#020202', l1: '#080808', l2: '#101010', obj: '#222222', light: '255, 255, 255', parallaxType: 'mountains' },
         width: 3200, height: 1000,
         startX: 175, startY: 535,
@@ -1611,8 +1893,8 @@ const levels = [
             }
         ]
     },
+    // LEVEL 18
     {
-        // LEVEL 18: The Accelerator Gates (Instant Momentum Multipliers)
         theme: { bg: '#000502', l1: '#001508', l2: '#002510', obj: '#053515', light: '0, 255, 100', parallaxType: 'machinery' },
         width: 4000, height: 1000,
         startX: 150, startY: 735,
@@ -1659,8 +1941,8 @@ const levels = [
             }
         ]
     },
+    // LEVEL 19
     {
-        // LEVEL 19: The Fuel Crisis (Fuel Canister Demo)
         theme: { bg: '#080500', l1: '#120a00', l2: '#1c1000', obj: '#a88d6c', light: '255, 150, 50', parallaxType: 'lightCaves' },
         width: 4000, height: 1200,
         startX: 200, startY: 885,
@@ -1687,8 +1969,8 @@ const levels = [
             { type: 'fuel', x: 1500, y: 150, amount: 80, color: '#ffaa00' }
         ]
     },
+    // LEVEL 20
     {
-        // LEVEL 20: The Dead Zone (EMP Field)
         theme: { bg: '#050505', l1: '#0a0a0a', l2: '#101010', obj: '#1a1a1a', light: '255, 50, 50', parallaxType: 'caves' },
         width: 3000, height: 1200,
         startX: 200, startY: 285,
@@ -1717,8 +1999,8 @@ const levels = [
             }
         ]
     },
+    // LEVEL 21
     {
-        // LEVEL 21: The Gearbox (Rotating Obstacles Demo)
         theme: { bg: '#080301', l1: '#150802', l2: '#250f05', obj: '#3a1808', light: '255, 150, 50', parallaxType: 'machinery' },
         width: 3200, height: 1200,
         startX: 150, startY: 535,
@@ -1755,8 +2037,8 @@ const levels = [
         ]
 
     },
+    // LEVEL 22
     {
-        // LEVEL 22: Directional Wormhole Demo (Fall Down -> Shoot Sideways)
         theme: { bg: '#0b001a', l1: '#160033', l2: '#2a004d', obj: '#400080', light: '200, 50, 255', parallaxType: 'machinery' },
         width: 2400, height: 1200,
         startX: 200, startY: 1035,
@@ -1796,8 +2078,8 @@ const levels = [
         ]
     },
 
+    // LEVEL 23
     {
-        // LEVEL 23: The Wasteland (Fuel) - FIXED (Far fewer canisters, requires massive coasting)
         theme: { bg: '#040506', l1: '#090c0f', l2: '#0e1318', obj: '#253040', light: '255, 255, 255', parallaxType: 'caves' },
         width: 4500, height: 1000,
         startX: 150, startY: 735,
@@ -1829,8 +2111,7 @@ const levels = [
             { type: 'fuel', x: 2650, y: 300, amount: 30, color: '#ff5500' }
         ]
     },
-
-    // LEVEL 24: portal 2
+    // LEVEL 24
     {
         "theme": {
             "bg": "#000000",
@@ -2146,8 +2427,7 @@ const levels = [
             }
         ]
     },
-
-    // LEVEL 25: boost
+    // LEVEL 25
     {
         "theme": {
             "bg": "#050505",
@@ -2379,6 +2659,8 @@ let player = {};
 let camera = { x: 0, y: 0 };
 let empActive = false;
 
+let activeUIButtons = []; // Stores hitboxes for current frame
+
 let lastTime = 0;
 let exhaustTimer = 1.0;
 let timer = 0;
@@ -2404,16 +2686,24 @@ let hasMoved = false;
 let isPracticeMode = false;
 let isSpeedrunMode = false;
 let isPaused = false;
-let menuScreen = 'main';
+let menuScreen = 'startup';
 let escHoldTimer = 0;
 let timesPage = 0;
+let timesTab = 0; // 0 = Your Times, 1 = Top 10 Full, 2 = Top 10 IL
+let lbCategory = 'Speedrun'; // 'Speedrun' or 'Casual'
+let lbLevel = 0; // 0 to levels.length - 1
 let practicePage = 0;
+let serverTestStatus = 'IDLE';
 
 let tHoldTimer = 0;
 let tTriggeredReset = false;
 
 let cheatsEnabled = false;
 let terminalActive = false;
+
+let profileInput = "";
+let profileStatus = "";
+let lbLevelInput = "";
 let terminalInput = "";
 let customFinalLevel = null;
 
@@ -2490,164 +2780,305 @@ window.addEventListener('click', e => {
         const cx = (e.clientX - rect.left) * scaleX;
         const cy = (e.clientY - rect.top) * scaleY;
 
-        if (menuScreen === 'main') {
-            const buttons = [
-                { text: 'NEW GAME', type: 'play', y: 160 },
-                { text: 'CONTINUE', type: 'continue', y: 230 },
-                { text: 'PRACTICE', type: 'practice', y: 300 },
-                { text: 'TUTORIAL', type: 'tutorial', y: 370 },
-                { text: 'TIMES', type: 'times', y: 440 },
-                { text: 'SAVE', type: 'save', y: 510 },
-                { text: 'LOAD', type: 'load', y: 580 },
-                { text: 'SETTINGS', type: 'settings', y: 650 }
-            ];
 
-            buttons.forEach(b => {
-                if (cx > canvas.width / 2 - 100 && cx < canvas.width / 2 + 100 &&
-                    cy > b.y && cy < b.y + 50) {
-                    if (b.type === 'play') {
-                        isPracticeMode = false;
-                        currentLevelIndex = 0;
-                        saveData.campaignProgress = 0;
-                        saveData.casualRTA = 0;
-                        saveData.casualIGT = 0;
-                        runInvalidated = false;
-                        runState = 'inactive';
-                        currentRunRTA = 0;
-                        currentRunIGT = 0;
-                        hasMoved = false;
-                        storeSaveData();
-                        loadLevel(currentLevelIndex);
-                    } else if (b.type === 'continue') {
-                        let isContinueDisabled = isSpeedrunMode || saveData.campaignProgress === 0;
-                        if (!isContinueDisabled) {
-                            isPracticeMode = false;
-                            currentLevelIndex = saveData.campaignProgress;
-                            if (currentLevelIndex >= levels.length) currentLevelIndex = 0;
-                            runInvalidated = true;
-                            runState = 'active';
-                            currentRunRTA = saveData.casualRTA || 0;
-                            currentRunIGT = saveData.casualIGT || 0;
-                            hasMoved = false;
-                            loadLevel(currentLevelIndex);
-                        }
-                    } else if (b.type === 'practice') {
-                        menuScreen = 'practice';
-                        practicePage = 0;
-                    } else if (b.type === 'tutorial') {
-                        isPracticeMode = false;
-                        loadLevel(-1);
-                    } else if (b.type === 'times') {
-                        menuScreen = 'times';
-                        timesPage = 0;
-                    } else if (b.type === 'save') {
-                        menuScreen = 'save';
-                        saveCopyStatus = "";
-                        generatedSaveCode = generateSaveCode();
-                    } else if (b.type === 'load') {
-                        menuScreen = 'load';
-                        loadInput = "";
-                        loadStatus = "";
-                    } else if (b.type === 'settings') {
-                        menuScreen = 'settings';
-                    }
-                }
-            });
-        } else if (menuScreen === 'practice') {
-            const startIndex = practicePage * 10;
-            const maxPracticePages = Math.ceil(levels.length / 10);
 
-            for (let i = 0; i < 10; i++) {
-                let actualIndex = startIndex + i;
-                if (actualIndex >= levels.length) continue;
-
-                let col = i % 5;
-                let row = Math.floor(i / 5);
-                let bx = canvas.width / 2 - 240 + col * 100;
-                let by = 260 + row * 100;
-
-                if (cx > bx && cx < bx + 80 && cy > by && cy < by + 80) {
-                    isPracticeMode = true;
-                    currentLevelIndex = actualIndex;
-                    loadLevel(currentLevelIndex);
+        let clickedBtn = null;
+        if (typeof activeUIButtons !== 'undefined') {
+            for (let b of activeUIButtons) {
+                if (cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h) {
+                    clickedBtn = b;
                     break;
                 }
             }
+        }
 
-            let arrY = 460;
-            if (practicePage > 0) {
-                let leftX = canvas.width / 2 - 380;
-                if (cx > leftX && cx < leftX + 120 && cy > arrY && cy < arrY + 40) {
-                    practicePage--;
+        if (clickedBtn) {
+            let id = clickedBtn.id;
+            
+            if (id === 'play') {
+                isPracticeMode = false;
+                currentLevelIndex = 0;
+                saveData.campaignProgress = 0;
+                saveData.casualRTA = 0;
+                saveData.casualIGT = 0;
+                runInvalidated = false;
+                runState = 'inactive';
+                currentRunRTA = 0;
+                currentRunIGT = 0;
+                hasMoved = false;
+                storeSaveData();
+                loadLevel(currentLevelIndex);
+            } else if (id === 'continue') {
+                let isContinueDisabled = isSpeedrunMode || saveData.campaignProgress === 0;
+                if (!isContinueDisabled) {
+                    isPracticeMode = false;
+                    currentLevelIndex = saveData.campaignProgress;
+                    if (currentLevelIndex >= levels.length) currentLevelIndex = 0;
+                    runInvalidated = true;
+                    runState = 'active';
+                    currentRunRTA = saveData.casualRTA || 0;
+                    currentRunIGT = saveData.casualIGT || 0;
+                    hasMoved = false;
+                    loadLevel(currentLevelIndex);
                 }
-            }
-            if (practicePage < maxPracticePages - 1) {
-                let rightX = canvas.width / 2 + 260;
-                if (cx > rightX && cx < rightX + 120 && cy > arrY && cy < arrY + 40) {
-                    practicePage++;
+            } else if (id === 'practice') {
+                menuScreen = 'practice';
+                practicePage = 0;
+            } else if (id === 'tutorial') {
+                isPracticeMode = false;
+                loadLevel(-1);
+            } else if (id === 'times') {
+                menuScreen = 'times';
+                timesPage = 0;
+            } else if (id === 'saveload') {
+                menuScreen = 'saveload';
+                saveCopyStatus = "";
+                generatedSaveCode = generateSaveCode();
+                loadInput = "";
+                loadStatus = "";
+            } else if (id === 'profile') {
+                menuScreen = 'profile';
+                profileInput = "";
+                profileStatus = "";
+            } else if (id === 'update_profile') {
+                if (typeof profileInput !== 'undefined' && profileInput.trim().length > 0) {
+                    saveData.username = profileInput.trim();
+                    if (saveData.isAnonymous) {
+                        saveData.playerId = db.generateSecurePlayerId(saveData.username);
+                        saveData.isAnonymous = false;
+                    }
+                    storeSaveData();
+                    if (typeof db !== 'undefined') db.updateProfile(saveData.username, saveData.playerId);
+                    profileStatus = "SUCCESS! PROFILE UPDATED.";
+                    profileInput = "";
+                } else {
+                    profileStatus = "ERROR: NAME CANNOT BE EMPTY";
                 }
-            }
-
-            if (cx > canvas.width / 2 - 100 && cx < canvas.width / 2 + 100 && cy > 550 && cy < 600) {
+            } else if (id === 'settings') {
+                menuScreen = 'settings';
+            } else if (id === 'back_settings' || id === 'back_saveload' || id === 'back_profile') {
                 menuScreen = 'main';
-            }
-        } else if (menuScreen === 'times' || menuScreen === 'save' || menuScreen === 'load') {
-            if (cx > canvas.width / 2 - 100 && cx < canvas.width / 2 + 100 && cy > 550 && cy < 600) {
+            } else if (id === 'startup_anon') {
+                saveData.isAnonymous = true;
+                storeSaveData();
+                menuScreen = 'main';
+            } else if (id === 'startup_create_btn') {
+                startupState = 'create';
+                startupStatus = "";
+                startupCreateInput = "";
+            } else if (id === 'startup_login_btn') {
+                startupState = 'login';
+                startupStatus = "";
+                startupLoginUser = "";
+                startupLoginId = "";
+                startupLoginFocus = 'username';
+            } else if (id === 'startup_back') {
+                startupState = 'menu';
+                startupStatus = "";
+            } else if (id === 'startup_focus_username') {
+                startupLoginFocus = 'username';
+            } else if (id === 'startup_focus_id') {
+                startupLoginFocus = 'id';
+            } else if (id === 'startup_create_submit') {
+                if (typeof startupCreateInput !== 'undefined' && startupCreateInput.trim().length > 0) {
+                    startupStatus = "CHECKING USERNAME...";
+                    let newName = startupCreateInput.trim().substring(0, 20);
+                    if (typeof db !== 'undefined') {
+                        db.checkUsername(newName).then(res => {
+                            if (res.error) {
+                                startupStatus = "ERROR: " + res.error;
+                            } else if (!res.available) {
+                                startupStatus = "ERROR: USERNAME TAKEN";
+                            } else {
+                                saveData.username = newName;
+                                saveData.playerId = db.generateSecurePlayerId(saveData.username);
+                                saveData.isAnonymous = false;
+                                storeSaveData();
+                                menuScreen = 'main';
+                                startupStatus = "";
+                            }
+                        }).catch(err => {
+                            startupStatus = "ERROR: NETWORK ERROR";
+                        });
+                    }
+                } else {
+                    startupStatus = "ERROR: NAME CANNOT BE EMPTY";
+                }
+            } else if (id === 'startup_login_submit') {
+                if (typeof startupLoginUser !== 'undefined' && startupLoginUser.trim().length > 0 && typeof startupLoginId !== 'undefined' && startupLoginId.trim().length > 9) {
+                    startupStatus = "LOADING...";
+                    if (typeof db !== 'undefined') {
+                        db.fetchProfile(startupLoginId.trim()).then(res => {
+                            if (res.error) {
+                                startupStatus = "ERROR: " + res.error;
+                            } else if (res.username !== startupLoginUser.trim()) {
+                                startupStatus = "ERROR: INCORRECT USERNAME";
+                            } else {
+                                saveData.isAnonymous = false;
+                                saveData.playerId = startupLoginId.trim();
+                                saveData.username = res.username;
+                                saveData.bestLevels = res.bestLevels || new Array(25).fill(null);
+                                saveData.bestRTA = res.bestRTA;
+                                saveData.bestIGT = res.bestIGT;
+                                saveData.casualRTA = res.casualRTA;
+                                saveData.casualIGT = res.casualIGT;
+                                saveData.campaignProgress = res.campaignProgress || 1;
+                                storeSaveData();
+                                menuScreen = 'main';
+                                startupStatus = "";
+                            }
+                        }).catch(err => {
+                            startupStatus = "ERROR: FETCH FAILED";
+                        });
+                    }
+                } else {
+                    startupStatus = "ERROR: FILL ALL FIELDS";
+                }
+            } else if (id === 'logout_profile') {
+                saveData = {
+                    campaignProgress: 1,
+                    isAnonymous: true,
+                    playerId: null,
+                    username: null,
+                    masterVolume: 0.5,
+                    effectsVolume: 0.5,
+                    musicVolume: 0.5,
+                    showTimer: true,
+                    showFPS: false,
+                    visualEffects: 'high',
+                    bestLevels: new Array(25).fill(null),
+                    bestRTA: null,
+                    bestIGT: null,
+                    casualRTA: null,
+                    casualIGT: null
+                };
+                storeSaveData();
+                menuScreen = 'startup';
+                startupInput = "";
+                startupStatus = "";
+            } else if (id === 'speedrun_mode') {
+                isSpeedrunMode = !isSpeedrunMode;
+                if (!isSpeedrunMode) {
+                    runInvalidated = true;
+                } else {
+                    cheatsEnabled = false;
+                    customFinalLevel = null;
+                    activeCheatPrefix = null;
+                    cheatPrefixTimer = 0;
+                }
+            } else if (id === 'visual_effects') {
+                if (saveData.visualEffects === 'high') saveData.visualEffects = 'medium';
+                else if (saveData.visualEffects === 'medium') saveData.visualEffects = 'low';
+                else saveData.visualEffects = 'high';
+                
+                if (saveData.visualEffects === 'high') MAX_PARTICLES = 800;
+                else if (saveData.visualEffects === 'medium') MAX_PARTICLES = 400;
+                else MAX_PARTICLES = 200;
+                particles = Array.from({ length: MAX_PARTICLES }, () => ({
+                    active: false, x: 0, y: 0, vx: 0, vy: 0, life: 0, type: 'exhaust'
+                }));
+                particleIndex = 0;
+                storeSaveData();
+            } else if (id === 'show_timer') {
+                saveData.showTimer = !saveData.showTimer;
+                storeSaveData();
+            } else if (id === 'show_fps') {
+                saveData.showFPS = !saveData.showFPS;
+                storeSaveData();
+            } else if (id === 'terminal_speedrun') {
+                allowTerminalInSpeedrun = !allowTerminalInSpeedrun;
+            } else if (id === 'test_server') {
+                if (serverTestStatus !== 'TESTING...') {
+                    serverTestStatus = 'TESTING...';
+                    if (typeof db !== 'undefined') {
+                        db.testConnection().then(res => {
+                            serverTestStatus = res;
+                        }).catch(() => {
+                            serverTestStatus = 'ERROR';
+                        });
+                    } else {
+                        serverTestStatus = 'OFFLINE';
+                    }
+                }
+            } else if (id === 'copy_save') {
+                navigator.clipboard.writeText(generatedSaveCode).catch(err => {
+                    let textArea = document.createElement("textarea");
+                    textArea.value = generatedSaveCode;
+                    document.body.appendChild(textArea);
+                    textArea.select();
+                    document.execCommand("Copy");
+                    textArea.remove();
+                });
+                saveCopyStatus = "COPIED TO CLIPBOARD!";
+            } else if (id === 'copy_player_id') {
+                navigator.clipboard.writeText(saveData.playerId).catch(err => {
+                    let textArea = document.createElement("textarea");
+                    textArea.value = saveData.playerId;
+                    document.body.appendChild(textArea);
+                    textArea.select();
+                    document.execCommand("Copy");
+                    textArea.remove();
+                });
+                profileStatus = "ID COPIED TO CLIPBOARD!";
+            } else if (clickedBtn.isSlider) {
+                let clickedVal = (cx - clickedBtn.x) / clickedBtn.w;
+                clickedVal = Math.max(0, Math.min(1, clickedVal));
+                
+                if (id === 'master_volume') {
+                    saveData.masterVolume = clickedVal;
+                    if (typeof AudioSystem !== 'undefined') AudioSystem.updateVolumes();
+                    storeSaveData();
+                } else if (id === 'effects_volume') {
+                    saveData.effectsVolume = clickedVal;
+                    if (typeof AudioSystem !== 'undefined') AudioSystem.updateVolumes();
+                    storeSaveData();
+                } else if (id === 'music_volume') {
+                    saveData.musicVolume = clickedVal;
+                    if (typeof AudioSystem !== 'undefined') AudioSystem.updateVolumes();
+                    storeSaveData();
+                }
+            } else if (id.startsWith('practice_level_')) {
+                let actualIndex = parseInt(id.split('_')[2], 10);
+                isPracticeMode = true;
+                currentLevelIndex = actualIndex;
+                loadLevel(currentLevelIndex);
+            } else if (id === 'practice_prev') {
+                practicePage--;
+            } else if (id === 'practice_next') {
+                practicePage++;
+            } else if (id.startsWith('times_tab_')) {
+                timesTab = parseInt(id.split('_')[2], 10);
+                if (timesTab === 1) {
+                    if (typeof db !== 'undefined') db.fetchLeaderboard(lbCategory);
+                }
+                if (timesTab === 2) {
+                    if (typeof db !== 'undefined') db.fetchLeaderboard('IL', lbLevel);
+                }
+            } else if (id === 'times_prev') {
+                timesPage--;
+            } else if (id === 'times_next') {
+                timesPage++;
+            } else if (id === 'times_category') {
+                lbCategory = lbCategory === 'Speedrun' ? 'Casual' : 'Speedrun';
+                if (typeof db !== 'undefined') db.fetchLeaderboard(lbCategory);
+            } else if (id === 'times_easter_egg') {
+                let now = Date.now();
+                individualClicks.push(now);
+                individualClicks = individualClicks.filter(t => now - t <= 3000);
+                if (individualClicks.length >= 3) {
+                    showTutorialTime = true;
+                    individualClicks = [];
+                }
+            } else if (id === 'back_practice' || id === 'back_times') {
                 menuScreen = 'main';
                 showTutorialTime = false;
             }
-
-            if (menuScreen === 'times') {
-                const maxTimesPages = Math.ceil(levels.length / 10);
-                let arrY = 480;
-
-                let wordX = canvas.width / 2 - 400;
-                let wordY = 200;
-                if (cx > wordX && cx < wordX + 150 && cy > wordY && cy < wordY + 40) {
-                    let now = Date.now();
-                    individualClicks.push(now);
-                    individualClicks = individualClicks.filter(t => now - t <= 3000);
-                    if (individualClicks.length >= 3) {
-                        showTutorialTime = true;
-                        individualClicks = [];
-                    }
-                }
-
-                if (timesPage > 0) {
-                    let leftX = canvas.width / 2 - 400;
-                    if (cx > leftX && cx < leftX + 120 && cy > arrY && cy < arrY + 40) {
-                        timesPage--;
-                    }
-                }
-                if (timesPage < maxTimesPages - 1) {
-                    let rightX = canvas.width / 2 - 200;
-                    if (cx > rightX && cx < rightX + 120 && cy > arrY && cy < arrY + 40) {
-                        timesPage++;
-                    }
-                }
-            }
-
-            if (menuScreen === 'save') {
-                if (cx > canvas.width / 2 - 400 && cx < canvas.width / 2 + 400 && cy > 250 && cy < 400) {
-                    navigator.clipboard.writeText(generatedSaveCode).catch(err => {
-                        let textArea = document.createElement("textarea");
-                        textArea.value = generatedSaveCode;
-                        document.body.appendChild(textArea);
-                        textArea.select();
-                        document.execCommand("Copy");
-                        textArea.remove();
-                    });
-                    saveCopyStatus = "COPIED TO CLIPBOARD!";
-                }
-            }
-        } else if (menuScreen === 'settings') {
-            if (cx > canvas.width / 2 - 100 && cx < canvas.width / 2 + 100 && cy > 620 && cy < 670) {
-                menuScreen = 'main';
-            }
-
+            
+            return;
+        } else if (menuScreen === 'settings' && !clickedBtn) {
             let sLeft = canvas.width / 2 - 140;
-            let sRight = canvas.width / 2 - 80;
-            if (cx > sLeft && cx < sRight && cy > 130 && cy < 190) {
+            let sRight = canvas.width / 2 + 140;
+            if (cx > sLeft && cx < sRight && cy > 90 && cy < 150) {
                 let now = Date.now();
                 if (now - lastSettingsClickTime > 1000) settingsHeaderClickCount = 0;
                 settingsHeaderClickCount++;
@@ -2656,89 +3087,36 @@ window.addEventListener('click', e => {
                     easterEggUnlocked = true;
                 }
             }
-
-            let toggle1Y = 170;
-            let toggle2Y = 225;
-            let toggle3Y = 280;
-            let toggle4Y = 335;
-            let toggle5Y = 390;
-            let toggle6Y = 445;
-            let toggle7Y = 500;
-            let toggle8Y = 555;
-
-            if (cx > canvas.width / 2 - 250 && cx < canvas.width / 2 + 250) {
-                let clickedVal = (cx - (canvas.width / 2 - 250)) / 500;
-                clickedVal = Math.max(0, Math.min(1, clickedVal));
-
-                if (cy > toggle1Y && cy < toggle1Y + 50) {
-                    isSpeedrunMode = !isSpeedrunMode;
-                    if (!isSpeedrunMode) {
-                        runInvalidated = true;
-                    } else {
-                        cheatsEnabled = false;
-                        customFinalLevel = null;
-                        activeCheatPrefix = null;
-                        cheatPrefixTimer = 0;
-                    }
-                }
-
-                if (cy > toggle2Y && cy < toggle2Y + 50) {
-                    if (saveData.visualEffects === 'high') saveData.visualEffects = 'medium';
-                    else if (saveData.visualEffects === 'medium') saveData.visualEffects = 'low';
-                    else saveData.visualEffects = 'high';
-                    
-                    if (saveData.visualEffects === 'high') MAX_PARTICLES = 800;
-                    else if (saveData.visualEffects === 'medium') MAX_PARTICLES = 400;
-                    else MAX_PARTICLES = 200;
-                    particles = Array.from({ length: MAX_PARTICLES }, () => ({
-                        active: false, x: 0, y: 0, vx: 0, vy: 0, life: 0, type: 'exhaust'
-                    }));
-                    particleIndex = 0;
-                    storeSaveData();
-                }
-
-                if (cy > toggle3Y && cy < toggle3Y + 50) {
-                    saveData.showTimer = !saveData.showTimer;
-                    storeSaveData();
-                }
-
-                if (cy > toggle4Y && cy < toggle4Y + 50) {
-                    saveData.showFPS = !saveData.showFPS;
-                    storeSaveData();
-                }
-
-                if (cy > toggle5Y && cy < toggle5Y + 50) {
-                    saveData.masterVolume = clickedVal;
-                    if (typeof AudioSystem !== 'undefined') AudioSystem.updateVolumes();
-                    storeSaveData();
-                }
-
-                if (cy > toggle6Y && cy < toggle6Y + 50) {
-                    saveData.effectsVolume = clickedVal;
-                    if (typeof AudioSystem !== 'undefined') AudioSystem.updateVolumes();
-                    storeSaveData();
-                }
-
-                if (cy > toggle7Y && cy < toggle7Y + 50) {
-                    saveData.musicVolume = clickedVal;
-                    if (typeof AudioSystem !== 'undefined') AudioSystem.updateVolumes();
-                    storeSaveData();
-                }
-
-                if (easterEggUnlocked && cy > toggle8Y && cy < toggle8Y + 50) {
-                    allowTerminalInSpeedrun = !allowTerminalInSpeedrun;
-                }
-            }
         }
     }
 });
 
 window.addEventListener('paste', e => {
-    if (state === 'menu' && menuScreen === 'load') {
+    if (state === 'menu' && menuScreen === 'saveload') {
         let text = (e.clipboardData || window.clipboardData).getData('text');
         if (text) {
             loadInput += text.trim();
             loadStatus = "";
+        }
+    } else if (state === 'menu' && menuScreen === 'profile') {
+        let text = (e.clipboardData || window.clipboardData).getData('text');
+        if (text) {
+            profileInput += text.trim();
+            profileStatus = "";
+        }
+    } else if (state === 'menu' && menuScreen === 'startup') {
+        let text = (e.clipboardData || window.clipboardData).getData('text');
+        if (text) {
+            if (startupState === 'create') {
+                startupCreateInput = (typeof startupCreateInput !== 'undefined' ? startupCreateInput : "") + text.trim();
+            } else if (startupState === 'login') {
+                if (startupLoginFocus === 'username') {
+                    startupLoginUser = (typeof startupLoginUser !== 'undefined' ? startupLoginUser : "") + text.trim();
+                } else {
+                    startupLoginId = (typeof startupLoginId !== 'undefined' ? startupLoginId : "") + text.trim();
+                }
+            }
+            startupStatus = "";
         }
     }
 });
@@ -2753,27 +3131,183 @@ window.addEventListener('blur', () => {
 });
 
 window.addEventListener('keydown', e => {
-    if (state === 'menu' && menuScreen === 'load') {
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return;
-
-        e.preventDefault();
-        if (e.key === 'Escape') {
-            menuScreen = 'main';
-        } else if (e.key === 'Enter') {
-            let success = parseSaveCode(loadInput);
-            if (success) {
-                loadStatus = "SUCCESS! DATA LOADED.";
-            } else {
-                loadStatus = "CORRUPTED DATA.";
+    if (state === 'menu') {
+        if (menuScreen === 'saveload') {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return;
+            e.preventDefault();
+            if (e.key === 'Escape') {
+                menuScreen = 'main';
+            } else if (e.key === 'Enter') {
+                let success = parseSaveCode(loadInput);
+                if (success) {
+                    loadStatus = "SUCCESS! DATA LOADED.";
+                } else {
+                    loadStatus = "CORRUPTED DATA.";
+                }
+            } else if (e.key === 'Backspace') {
+                loadInput = loadInput.slice(0, -1);
+                loadStatus = "";
+            } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+                loadInput += e.key;
+                loadStatus = "";
             }
-        } else if (e.key === 'Backspace') {
-            loadInput = loadInput.slice(0, -1);
-            loadStatus = "";
-        } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-            loadInput += e.key;
-            loadStatus = "";
+            return;
+        } else if (menuScreen === 'profile') {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return;
+            e.preventDefault();
+            if (e.key === 'Escape') {
+                menuScreen = 'main';
+            } else if (e.key === 'Enter') {
+                if (typeof profileInput !== 'undefined' && profileInput.trim().length > 0) {
+                    let newName = profileInput.trim().substring(0, 20);
+                    if (saveData.username === newName) {
+                        profileStatus = "SUCCESS! PROFILE UPDATED.";
+                        profileInput = "";
+                        return;
+                    }
+                    
+                    profileStatus = "CHECKING USERNAME...";
+                    if (typeof db !== 'undefined') {
+                        db.checkUsername(newName).then(res => {
+                            if (res.error) {
+                                profileStatus = "ERROR: " + res.error;
+                            } else if (!res.available) {
+                                profileStatus = "ERROR: USERNAME TAKEN";
+                            } else {
+                                saveData.username = newName;
+                                if (saveData.isAnonymous) {
+                                    saveData.playerId = db.generateSecurePlayerId(saveData.username);
+                                    saveData.isAnonymous = false;
+                                }
+                                storeSaveData();
+                                db.updateProfile(saveData.username, saveData.playerId);
+                                profileStatus = "SUCCESS! PROFILE UPDATED.";
+                                profileInput = "";
+                            }
+                        }).catch(err => {
+                            profileStatus = "ERROR: NETWORK ERROR";
+                        });
+                    }
+                } else {
+                    profileStatus = "ERROR: NAME CANNOT BE EMPTY";
+                }
+            } else if (e.key === 'Backspace') {
+                profileInput = profileInput.slice(0, -1);
+                profileStatus = "";
+            } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+                profileInput += e.key;
+                profileStatus = "";
+            }
+            return;
+        } else if (menuScreen === 'startup') {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return;
+            e.preventDefault();
+
+            if (startupState === 'create') {
+                if (typeof startupCreateInput === 'undefined') startupCreateInput = "";
+                if (e.key === 'Enter') {
+                    if (startupCreateInput.trim().length > 0) {
+                        startupStatus = "CHECKING USERNAME...";
+                        let newName = startupCreateInput.trim().substring(0, 20);
+                        if (typeof db !== 'undefined') {
+                            db.checkUsername(newName).then(res => {
+                                if (res.error) {
+                                    startupStatus = "ERROR: " + res.error;
+                                } else if (!res.available) {
+                                    startupStatus = "ERROR: USERNAME TAKEN";
+                                } else {
+                                    saveData.username = newName;
+                                    saveData.playerId = db.generateSecurePlayerId(saveData.username);
+                                    saveData.isAnonymous = false;
+                                    storeSaveData();
+                                    menuScreen = 'main';
+                                    startupStatus = "";
+                                }
+                            }).catch(err => {
+                                startupStatus = "ERROR: NETWORK ERROR";
+                            });
+                        }
+                    } else {
+                        startupStatus = "ERROR: NAME CANNOT BE EMPTY";
+                    }
+                } else if (e.key === 'Backspace') {
+                    startupCreateInput = startupCreateInput.slice(0, -1);
+                    startupStatus = "";
+                } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+                    startupCreateInput += e.key;
+                    startupStatus = "";
+                }
+            } else if (startupState === 'login') {
+                if (typeof startupLoginUser === 'undefined') startupLoginUser = "";
+                if (typeof startupLoginId === 'undefined') startupLoginId = "";
+
+                if (e.key === 'Tab') {
+                    startupLoginFocus = startupLoginFocus === 'username' ? 'id' : 'username';
+                } else if (e.key === 'Enter') {
+                    if (startupLoginUser.trim().length > 0 && startupLoginId.trim().length > 9) {
+                        startupStatus = "LOADING...";
+                        if (typeof db !== 'undefined') {
+                            db.fetchProfile(startupLoginId.trim()).then(res => {
+                                if (res.error) {
+                                    startupStatus = "ERROR: " + res.error;
+                                } else if (res.username !== startupLoginUser.trim()) {
+                                    startupStatus = "ERROR: INCORRECT USERNAME";
+                                } else {
+                                    saveData.isAnonymous = false;
+                                    saveData.playerId = startupLoginId.trim();
+                                    saveData.username = res.username;
+                                    saveData.bestLevels = res.bestLevels || new Array(25).fill(null);
+                                    saveData.bestRTA = res.bestRTA;
+                                    saveData.bestIGT = res.bestIGT;
+                                    saveData.casualRTA = res.casualRTA;
+                                    saveData.casualIGT = res.casualIGT;
+                                    saveData.campaignProgress = res.campaignProgress || 1;
+                                    storeSaveData();
+                                    menuScreen = 'main';
+                                    startupStatus = "";
+                                }
+                            }).catch(err => {
+                                startupStatus = "ERROR: FETCH FAILED";
+                            });
+                        }
+                    } else {
+                        startupStatus = "ERROR: FILL ALL FIELDS";
+                    }
+                } else if (e.key === 'Backspace') {
+                    if (startupLoginFocus === 'username') startupLoginUser = startupLoginUser.slice(0, -1);
+                    else startupLoginId = startupLoginId.slice(0, -1);
+                    startupStatus = "";
+                } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+                    if (startupLoginFocus === 'username') startupLoginUser += e.key;
+                    else startupLoginId += e.key;
+                    startupStatus = "";
+                }
+            }
+            return;
+        } else if (menuScreen === 'times' && timesTab === 2) {
+            // Let them use escape or whatever, but also type level num
+            if (e.key === 'Escape') {
+                menuScreen = 'main';
+                e.preventDefault();
+                return;
+            } else if (e.key === 'Enter') {
+                let p = parseInt(lbLevelInput, 10);
+                if (!isNaN(p) && p > 0 && p <= levels.length) {
+                    lbLevel = p - 1;
+                    if (typeof db !== 'undefined') db.fetchLeaderboard('IL', lbLevel);
+                }
+                e.preventDefault();
+                return;
+            } else if (e.key === 'Backspace') {
+                lbLevelInput = lbLevelInput.slice(0, -1);
+                e.preventDefault();
+                return;
+            } else if (e.key.length === 1 && !isNaN(parseInt(e.key, 10))) {
+                lbLevelInput += e.key;
+                e.preventDefault();
+                return;
+            }
         }
-        return;
     }
 
     if (isPaused) {
@@ -2790,7 +3324,9 @@ window.addEventListener('keydown', e => {
             terminalActive = false;
         } else if (e.key === 'Enter') {
             const cmd = terminalInput.trim().toLowerCase();
-            if (cmd === 'sudo cheat = true' || cmd === 'sudo cheats = true') {
+            if (cmd === 'sudo push/pull data' || cmd === 'sudo push data' || cmd === 'sudo pull data' || cmd === 'sudo sync data') {
+                if (typeof db !== 'undefined') db.pushAllLocalData();
+            } else if (cmd === 'sudo cheat = true' || cmd === 'sudo cheats = true') {
                 cheatsEnabled = true;
                 runInvalidated = true;
             } else if (cmd === 'sudo cheat = false' || cmd === 'sudo cheats = false') {
@@ -2817,6 +3353,14 @@ window.addEventListener('keydown', e => {
                         saveData.bestLevels[parsed - 1] = null;
                         storeSaveData();
                     }
+                }
+            } else if (cmd === 'sudo delete profile = true') {
+                if (confirm("Are you sure you want to delete your profile and wipe data from the database? This cannot be undone.")) {
+                    if (typeof db !== 'undefined' && saveData.playerId) {
+                        db.deleteProfile(saveData.playerId);
+                    }
+                    localStorage.removeItem('retrograde_save');
+                    location.reload();
                 }
             }
             terminalActive = false;
@@ -3078,7 +3622,11 @@ function goToMenu() {
     }
 
     state = 'menu';
-    menuScreen = 'main';
+    if (!saveData.username && !saveData.isAnonymous) {
+        menuScreen = 'startup';
+    } else {
+        menuScreen = 'main';
+    }
     activeEvent = null;
 
     restorePhysics();
@@ -4038,6 +4586,9 @@ function update(dt) {
                                 if (prevBest === null || timer < prevBest) {
                                     saveData.bestLevels[currentLevelIndex] = timer;
                                     storeSaveData();
+                                    if (typeof db !== 'undefined' && !cheatsEnabled && customFinalLevel === null) {
+                                        db.submitRun('IL', timer, timer, currentLevelIndex);
+                                    }
                                 }
 
                                 // CAMPAIGN SAVE PROGRESS
@@ -4075,10 +4626,16 @@ function update(dt) {
                                                 if (victoryData.newRTA) saveData.bestRTA = currentRunRTA;
                                                 if (victoryData.newIGT) saveData.bestIGT = currentRunIGT;
                                                 storeSaveData();
+                                                if (typeof db !== 'undefined' && !cheatsEnabled) {
+                                                    db.submitRun('Speedrun', currentRunRTA, currentRunIGT);
+                                                }
                                             }
                                         } else {
                                             victoryData.newRTA = false;
                                             victoryData.newIGT = false;
+                                            if (typeof db !== 'undefined' && !cheatsEnabled && customFinalLevel === null) {
+                                                db.submitRun('Casual', currentRunRTA, currentRunIGT);
+                                            }
                                         }
 
                                         runState = 'inactive';
@@ -4395,6 +4952,50 @@ function drawHUD() {
 }
 
 function drawMenuUI() {
+    activeUIButtons = [];
+
+    function drawUIButton(id, text, x, y, w, h, style = 'normal', disabled = false) {
+        if (!disabled) {
+            activeUIButtons.push({ id, text, x, y, w, h });
+        }
+        
+        let isHover = false;
+        if (!disabled && typeof mouseX !== 'undefined' && typeof mouseY !== 'undefined') {
+            if (mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h) {
+                isHover = true;
+            }
+        }
+        
+        if (disabled) {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(x, y, w, h);
+            ctx.fillStyle = '#555';
+        } else {
+            let hoverFill = style === 'danger' ? 'rgba(255, 0, 0, 0.1)' : 'rgba(0, 255, 255, 0.1)';
+            let strokeColor = style === 'danger' ? '#f00' : '#0ff';
+            
+            ctx.fillStyle = isHover ? hoverFill : 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeStyle = isHover ? strokeColor : '#334155';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(x, y, w, h);
+            
+            ctx.fillStyle = isHover ? strokeColor : '#fff';
+            if (isHover) {
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = strokeColor;
+            }
+        }
+        
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 24px monospace';
+        ctx.fillText(text, x + w / 2, y + h / 2 + 8);
+        ctx.shadowBlur = 0;
+    }
+
     if (menuScreen === 'start') {
         ctx.textAlign = 'center';
         
@@ -4414,6 +5015,109 @@ function drawMenuUI() {
         ctx.shadowBlur = 0;
     }
 
+    if (menuScreen === 'startup') {
+        let cx = canvas.width / 2;
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 64px monospace';
+        ctx.fillStyle = '#fff';
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = '#0ff';
+        ctx.fillText("RETROGRADE", cx, 110);
+        ctx.shadowBlur = 0;
+
+        if (typeof startupState === 'undefined') startupState = 'menu';
+
+        if (startupState === 'menu') {
+            ctx.font = '24px monospace';
+            ctx.fillStyle = '#aaa';
+            ctx.fillText("Welcome to Retrograde. Please select an option.", cx, 220);
+
+            drawUIButton('startup_create_btn', 'CREATE PROFILE', cx - 150, 300, 300, 50);
+            drawUIButton('startup_login_btn', 'LOG IN', cx - 150, 380, 300, 50);
+            drawUIButton('startup_anon', 'CONTINUE AS GUEST', cx - 150, 460, 300, 50);
+        } else if (startupState === 'create') {
+            ctx.font = '24px monospace';
+            ctx.fillStyle = '#aaa';
+            ctx.fillText("ENTER DESIRED USERNAME", cx, 220);
+
+            let boxX = cx - 200;
+            let boxY = 280;
+            let boxW = 400;
+            let boxH = 50;
+            
+            ctx.fillStyle = 'rgba(0, 5, 10, 0.8)';
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 4;
+            ctx.fillRect(boxX, boxY, boxW, boxH);
+            ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+            ctx.font = '20px monospace';
+            ctx.fillStyle = '#fff';
+            let displayInput = (typeof startupCreateInput !== 'undefined' ? startupCreateInput : "") + (Math.floor(Date.now() / 500) % 2 === 0 ? '_' : ' ');
+            ctx.fillText(displayInput, cx, boxY + 32);
+            
+            if (typeof startupStatus !== 'undefined' && startupStatus) {
+                ctx.fillStyle = startupStatus.includes("SUCCESS") ? '#0f0' : (startupStatus.includes("LOADING") ? '#ff0' : '#f00');
+                ctx.fillText(startupStatus, cx, 360);
+            }
+            
+            drawUIButton('startup_create_submit', 'CREATE PROFILE', cx - 150, 420, 300, 50);
+            drawUIButton('startup_back', 'BACK', cx - 150, 490, 300, 50, 'danger');
+        } else if (startupState === 'login') {
+            if (typeof startupLoginFocus === 'undefined') startupLoginFocus = 'username';
+            ctx.font = '24px monospace';
+            ctx.fillStyle = '#aaa';
+            ctx.fillText("ENTER EXACT USERNAME AND PLAYER ID", cx, 220);
+
+            let uBoxX = cx - 150;
+            let uBoxY = 260;
+            let boxW = 400;
+            let boxH = 40;
+            
+            ctx.fillStyle = 'rgba(0, 5, 10, 0.8)';
+            ctx.strokeStyle = startupLoginFocus === 'username' ? '#0ff' : '#334155';
+            ctx.lineWidth = startupLoginFocus === 'username' ? 4 : 2;
+            ctx.fillRect(uBoxX, uBoxY, boxW, boxH);
+            ctx.strokeRect(uBoxX, uBoxY, boxW, boxH);
+
+            ctx.font = '16px monospace';
+            ctx.fillStyle = '#aaa';
+            ctx.textAlign = 'right';
+            ctx.fillText("USERNAME:", uBoxX - 20, uBoxY + 25);
+            ctx.textAlign = 'left';
+            ctx.fillStyle = '#fff';
+            let uInput = (typeof startupLoginUser !== 'undefined' ? startupLoginUser : "") + (startupLoginFocus === 'username' && Math.floor(Date.now() / 500) % 2 === 0 ? '_' : ' ');
+            ctx.fillText(uInput, uBoxX + 10, uBoxY + 25);
+            
+            let iBoxY = 320;
+            ctx.fillStyle = 'rgba(0, 5, 10, 0.8)';
+            ctx.strokeStyle = startupLoginFocus === 'id' ? '#0ff' : '#334155';
+            ctx.lineWidth = startupLoginFocus === 'id' ? 4 : 2;
+            ctx.fillRect(uBoxX, iBoxY, boxW, boxH);
+            ctx.strokeRect(uBoxX, iBoxY, boxW, boxH);
+            
+            ctx.fillStyle = '#aaa';
+            ctx.textAlign = 'right';
+            ctx.fillText("PLAYER ID:", uBoxX - 20, iBoxY + 25);
+            ctx.textAlign = 'left';
+            ctx.fillStyle = '#fff';
+            let iInput = (typeof startupLoginId !== 'undefined' ? startupLoginId : "") + (startupLoginFocus === 'id' && Math.floor(Date.now() / 500) % 2 === 0 ? '_' : ' ');
+            ctx.fillText(iInput, uBoxX + 10, iBoxY + 25);
+            ctx.textAlign = 'center';
+
+            activeUIButtons.push({ id: 'startup_focus_username', x: uBoxX, y: uBoxY, w: boxW, h: boxH });
+            activeUIButtons.push({ id: 'startup_focus_id', x: uBoxX, y: iBoxY, w: boxW, h: boxH });
+
+            if (typeof startupStatus !== 'undefined' && startupStatus) {
+                ctx.fillStyle = startupStatus.includes("SUCCESS") ? '#0f0' : (startupStatus.includes("LOADING") ? '#ff0' : '#f00');
+                ctx.fillText(startupStatus, cx, 400);
+            }
+
+            drawUIButton('startup_login_submit', 'LOG IN', cx - 250, 440, 200, 50);
+            drawUIButton('startup_back', 'BACK', cx + 50, 440, 200, 50, 'danger');
+        }
+    }
+
     if (menuScreen === 'main' || menuScreen === 'practice') {
         ctx.textAlign = 'center';
         ctx.font = 'bold 64px monospace';
@@ -4425,49 +5129,30 @@ function drawMenuUI() {
     }
 
     if (menuScreen === 'main') {
-        const buttons = [
-            { text: 'NEW GAME', type: 'play', y: 160 },
-            { text: 'CONTINUE', type: 'continue', y: 230 },
-            { text: 'PRACTICE', type: 'practice', y: 300 },
-            { text: 'TUTORIAL', type: 'tutorial', y: 370 },
-            { text: 'TIMES', type: 'times', y: 440 },
-            { text: 'SAVE', type: 'save', y: 510 },
-            { text: 'LOAD', type: 'load', y: 580 },
-            { text: 'SETTINGS', type: 'settings', y: 650 }
-        ];
-
-        ctx.font = 'bold 24px monospace';
         let isContinueDisabled = isSpeedrunMode || saveData.campaignProgress === 0;
 
-        buttons.forEach(b => {
-            const isHover = mouseX > canvas.width / 2 - 100 && mouseX < canvas.width / 2 + 100 &&
-                mouseY > b.y && mouseY < b.y + 50;
-
-            if (b.type === 'continue' && isContinueDisabled) {
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-                ctx.fillRect(canvas.width / 2 - 100, b.y, 200, 50);
-                ctx.strokeStyle = '#555';
-                ctx.lineWidth = 4;
-                ctx.strokeRect(canvas.width / 2 - 100, b.y, 200, 50);
-                ctx.fillStyle = '#555';
-                ctx.fillText(b.text, canvas.width / 2, b.y + 32);
-            } else {
-                ctx.fillStyle = isHover ? 'rgba(0, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.5)';
-                ctx.fillRect(canvas.width / 2 - 100, b.y, 200, 50);
-
-                ctx.strokeStyle = isHover ? '#0ff' : '#334155';
-                ctx.lineWidth = 4;
-                ctx.strokeRect(canvas.width / 2 - 100, b.y, 200, 50);
-
-                ctx.fillStyle = isHover ? '#0ff' : '#fff';
-                if (isHover) {
-                    ctx.shadowBlur = 10;
-                    ctx.shadowColor = '#0ff';
-                }
-                ctx.fillText(b.text, canvas.width / 2, b.y + 32);
-                ctx.shadowBlur = 0;
-            }
-        });
+        let bw = 240;
+        let bh = 60;
+        let cx = canvas.width / 2;
+        
+        // 2-column layout
+        // Col 1: PLAY, PRACTICE, TIMES, SAVE
+        // Col 2: CONTINUE, TUTORIAL, SETTINGS, LOAD
+        
+        let col1X = cx - 260;
+        let col2X = cx + 20;
+        
+        drawUIButton('play', 'NEW GAME', col1X, 200, bw, bh);
+        drawUIButton('continue', 'CONTINUE', col2X, 200, bw, bh, 'normal', isContinueDisabled);
+        
+        drawUIButton('practice', 'PRACTICE', col1X, 300, bw, bh);
+        drawUIButton('tutorial', 'TUTORIAL', col2X, 300, bw, bh);
+        
+        drawUIButton('times', 'TIMES', col1X, 400, bw, bh);
+        drawUIButton('settings', 'SETTINGS', col2X, 400, bw, bh);
+        
+        drawUIButton('profile', 'PROFILE', col1X, 500, bw, bh);
+        drawUIButton('saveload', 'SAVE / LOAD', col2X, 500, bw, bh);
     } else if (menuScreen === 'practice') {
         ctx.font = 'bold 24px monospace';
         ctx.textAlign = 'center';
@@ -4484,7 +5169,8 @@ function drawMenuUI() {
             let bx = canvas.width / 2 - 240 + col * 100;
             let by = 260 + row * 100;
 
-            const isHover = mouseX > bx && mouseX < bx + 80 && mouseY > by && mouseY < by + 80;
+            activeUIButtons.push({ id: `practice_level_${actualIndex}`, x: bx, y: by, w: 80, h: 80 });
+            const isHover = typeof mouseX !== 'undefined' && mouseX > bx && mouseX < bx + 80 && mouseY > by && mouseY < by + 80;
 
             ctx.fillStyle = isHover ? 'rgba(0, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.5)';
             ctx.fillRect(bx, by, 80, 80);
@@ -4505,7 +5191,8 @@ function drawMenuUI() {
         let arrY = 460;
         if (practicePage > 0) {
             let leftX = canvas.width / 2 - 380;
-            const isHoverLeft = mouseX > leftX && mouseX < leftX + 120 && mouseY > arrY && mouseY < arrY + 40;
+            activeUIButtons.push({ id: 'practice_prev', x: leftX, y: arrY, w: 120, h: 40 });
+            const isHoverLeft = typeof mouseX !== 'undefined' && mouseX > leftX && mouseX < leftX + 120 && mouseY > arrY && mouseY < arrY + 40;
             ctx.fillStyle = isHoverLeft ? '#0ff' : '#334155';
             if (isHoverLeft) { ctx.shadowBlur = 10; ctx.shadowColor = '#0ff'; }
             ctx.fillText("<< PREV", leftX + 60, arrY + 25);
@@ -4514,31 +5201,15 @@ function drawMenuUI() {
 
         if (practicePage < maxPracticePages - 1) {
             let rightX = canvas.width / 2 + 260;
-            const isHoverRight = mouseX > rightX && mouseX < rightX + 120 && mouseY > arrY && mouseY < arrY + 40;
+            activeUIButtons.push({ id: 'practice_next', x: rightX, y: arrY, w: 120, h: 40 });
+            const isHoverRight = typeof mouseX !== 'undefined' && mouseX > rightX && mouseX < rightX + 120 && mouseY > arrY && mouseY < arrY + 40;
             ctx.fillStyle = isHoverRight ? '#0ff' : '#334155';
             if (isHoverRight) { ctx.shadowBlur = 10; ctx.shadowColor = '#0ff'; }
             ctx.fillText("NEXT >>", rightX + 60, arrY + 25);
             ctx.shadowBlur = 0;
         }
 
-        let backY = 550;
-        const isBackHover = mouseX > canvas.width / 2 - 100 && mouseX < canvas.width / 2 + 100 &&
-            mouseY > backY && mouseY < backY + 50;
-
-        ctx.fillStyle = isBackHover ? 'rgba(255, 0, 0, 0.1)' : 'rgba(0, 0, 0, 0.5)';
-        ctx.fillRect(canvas.width / 2 - 100, backY, 200, 50);
-
-        ctx.strokeStyle = isBackHover ? '#f00' : '#334155';
-        ctx.lineWidth = 4;
-        ctx.strokeRect(canvas.width / 2 - 100, backY, 200, 50);
-
-        ctx.fillStyle = isBackHover ? '#f00' : '#fff';
-        if (isBackHover) {
-            ctx.shadowBlur = 10;
-            ctx.shadowColor = '#f00';
-        }
-        ctx.fillText("BACK", canvas.width / 2, backY + 32);
-        ctx.shadowBlur = 0;
+        drawUIButton('back_practice', 'BACK', canvas.width / 2 - 100, 550, 200, 50, 'danger');
 
     } else if (menuScreen === 'times') {
         ctx.textAlign = 'center';
@@ -4546,230 +5217,333 @@ function drawMenuUI() {
         ctx.fillStyle = '#fff';
         ctx.shadowBlur = 20;
         ctx.shadowColor = '#0ff';
-        ctx.fillText("TIMES DASHBOARD", canvas.width / 2, 130);
+        ctx.fillText("TIMES DASHBOARD", canvas.width / 2, 110);
         ctx.shadowBlur = 0;
+
+        const tabs = [
+            { text: 'Your Times', x: canvas.width / 2 - 350 },
+            { text: 'Leaderboard', x: canvas.width / 2 - 100 },
+            { text: 'Level LB', x: canvas.width / 2 + 150 }
+        ];
+
+        for (let i = 0; i < tabs.length; i++) {
+            let t = tabs[i];
+            activeUIButtons.push({ id: `times_tab_${i}`, x: t.x, y: 150, w: 200, h: 40 });
+            let isHover = typeof mouseX !== 'undefined' && mouseX > t.x && mouseX < t.x + 200 && mouseY > 150 && mouseY < 190;
+            ctx.fillStyle = timesTab === i ? 'rgba(0, 255, 255, 0.4)' : (isHover ? 'rgba(0, 255, 255, 0.2)' : 'rgba(255, 255, 255, 0.1)');
+            ctx.fillRect(t.x, 150, 200, 40);
+            ctx.strokeStyle = timesTab === i ? '#0ff' : '#aaa';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(t.x, 150, 200, 40);
+            ctx.fillStyle = timesTab === i ? '#fff' : '#ccc';
+            ctx.font = 'bold 20px monospace';
+            ctx.fillText(t.text, t.x + 100, 178);
+        }
 
         ctx.fillStyle = 'rgba(0, 5, 10, 0.8)';
         ctx.strokeStyle = '#334155';
         ctx.lineWidth = 4;
-        ctx.fillRect(canvas.width / 2 - 450, 180, 900, 330);
-        ctx.strokeRect(canvas.width / 2 - 450, 180, 900, 330);
+        ctx.fillRect(canvas.width / 2 - 450, 200, 900, 320);
+        ctx.strokeRect(canvas.width / 2 - 450, 200, 900, 320);
 
-        ctx.textAlign = 'left';
-        ctx.font = 'bold 24px monospace';
-        ctx.fillStyle = '#00ffcc';
-        ctx.fillText("INDIVIDUAL LEVELS", canvas.width / 2 - 400, 230);
+        if (timesTab === 0) {
+            ctx.textAlign = 'left';
+            ctx.font = 'bold 24px monospace';
+            ctx.fillStyle = '#00ffcc';
+            
+            let wordX = canvas.width / 2 - 400;
+            let wordY = 200;
+            activeUIButtons.push({ id: 'times_easter_egg', x: wordX, y: wordY, w: 250, h: 40 });
+            ctx.fillText("INDIVIDUAL LEVELS", wordX, 240);
 
-        ctx.fillStyle = '#fff';
-        ctx.font = '20px monospace';
-
-        const startIndex = timesPage * 10;
-        const maxTimesPages = Math.ceil(levels.length / 10);
-
-        for (let i = 0; i < 5; i++) {
-            let idx1 = startIndex + i;
-            if (idx1 < levels.length) {
-                let val1 = saveData.bestLevels[idx1];
-                let t1 = val1 !== undefined && val1 !== null ? val1.toFixed(3) + 's' : '--';
-                ctx.fillText(`L${idx1 + 1 < 10 ? '0' + (idx1 + 1) : idx1 + 1}: ${t1}`, canvas.width / 2 - 400, 280 + i * 40);
-            }
-
-            let idx2 = startIndex + i + 5;
-            if (idx2 < levels.length) {
-                let val2 = saveData.bestLevels[idx2];
-                let t2 = val2 !== undefined && val2 !== null ? val2.toFixed(3) + 's' : '--';
-                ctx.fillText(`L${idx2 + 1 < 10 ? '0' + (idx2 + 1) : idx2 + 1}: ${t2}`, canvas.width / 2 - 200, 280 + i * 40);
-            }
-        }
-
-        ctx.font = 'bold 24px monospace';
-        let arrY = 480;
-
-        if (timesPage > 0) {
-            let leftX = canvas.width / 2 - 400;
-            const isHoverLeft = mouseX > leftX && mouseX < leftX + 120 && mouseY > arrY && mouseY < arrY + 40;
-            ctx.fillStyle = isHoverLeft ? '#0ff' : '#334155';
-            if (isHoverLeft) { ctx.shadowBlur = 10; ctx.shadowColor = '#0ff'; }
-            ctx.fillText("<< PREV", leftX, arrY + 25);
-            ctx.shadowBlur = 0;
-        }
-
-        if (timesPage < maxTimesPages - 1) {
-            let rightX = canvas.width / 2 - 200;
-            const isHoverRight = mouseX > rightX && mouseX < rightX + 120 && mouseY > arrY && mouseY < arrY + 40;
-            ctx.fillStyle = isHoverRight ? '#0ff' : '#334155';
-            if (isHoverRight) { ctx.shadowBlur = 10; ctx.shadowColor = '#0ff'; }
-            ctx.fillText("NEXT >>", rightX, arrY + 25);
-            ctx.shadowBlur = 0;
-        }
-
-        ctx.font = 'bold 24px monospace';
-        ctx.fillStyle = '#00ffcc';
-        ctx.fillText("FULL RUN RECORDS", canvas.width / 2 + 50, 230);
-
-        ctx.fillStyle = '#fff';
-        ctx.font = '20px monospace';
-
-        let rtaText = saveData.bestRTA !== null ? saveData.bestRTA.toFixed(3) + 's' : '--';
-        let igtText = saveData.bestIGT !== null ? saveData.bestIGT.toFixed(3) + 's' : '--';
-
-        let sumText = '--';
-        let hasAll = true;
-        let sumOfBests = 0;
-        for (let i = 0; i < levels.length; i++) {
-            if (saveData.bestLevels[i] === null || saveData.bestLevels[i] === undefined) {
-                hasAll = false;
-                break;
-            }
-            sumOfBests += saveData.bestLevels[i];
-        }
-        if (hasAll && levels.length > 0) {
-            sumText = sumOfBests.toFixed(3) + 's';
-        }
-
-        ctx.fillText(`BEST RTA     : ${rtaText}`, canvas.width / 2 + 50, 280);
-        ctx.fillText(`BEST IGT     : ${igtText}`, canvas.width / 2 + 50, 320);
-        ctx.fillText(`SUM OF BESTS : ${sumText}`, canvas.width / 2 + 50, 360);
-
-        let isTainted = (runInvalidated || cheatsEnabled || customFinalLevel !== null || !isSpeedrunMode);
-        let invalidStr = isTainted ? "YES" : "NO";
-        if (!isTainted && saveData.bestRTA === null && !hasAll && runState === 'inactive') {
-            invalidStr = "--";
-        }
-        ctx.fillText(`RUN INVALID  : ${invalidStr}`, canvas.width / 2 + 50, 400);
-
-        if (showTutorialTime) {
-            let tutTime = saveData.bestTutorial !== null && saveData.bestTutorial !== undefined ? saveData.bestTutorial.toFixed(3) + 's' : '--';
             ctx.fillStyle = '#fff';
-            ctx.fillText(`TUTORIAL     : ${tutTime}`, canvas.width / 2 + 50, 440);
+            ctx.font = '20px monospace';
+
+            const startIndex = timesPage * 10;
+            const maxTimesPages = Math.ceil(levels.length / 10);
+
+            for (let i = 0; i < 5; i++) {
+                let idx1 = startIndex + i;
+                if (idx1 < levels.length) {
+                    let val1 = saveData.bestLevels[idx1];
+                    let t1 = val1 !== undefined && val1 !== null ? val1.toFixed(3) + 's' : '--';
+                    ctx.fillText(`L${idx1 + 1 < 10 ? '0' + (idx1 + 1) : idx1 + 1}: ${t1}`, canvas.width / 2 - 400, 280 + i * 35);
+                }
+
+                let idx2 = startIndex + i + 5;
+                if (idx2 < levels.length) {
+                    let val2 = saveData.bestLevels[idx2];
+                    let t2 = val2 !== undefined && val2 !== null ? val2.toFixed(3) + 's' : '--';
+                    ctx.fillText(`L${idx2 + 1 < 10 ? '0' + (idx2 + 1) : idx2 + 1}: ${t2}`, canvas.width / 2 - 200, 280 + i * 35);
+                }
+            }
+
+            ctx.font = 'bold 24px monospace';
+            let arrY = 470;
+
+            if (timesPage > 0) {
+                let leftX = canvas.width / 2 - 400;
+                activeUIButtons.push({ id: 'times_prev', x: leftX, y: arrY, w: 120, h: 40 });
+                let isHover = typeof mouseX !== 'undefined' && mouseX > leftX && mouseX < leftX + 120 && mouseY > arrY && mouseY < arrY + 40;
+                ctx.fillStyle = isHover ? '#fff' : '#0ff';
+                if (isHover) { ctx.shadowBlur = 10; ctx.shadowColor = '#fff'; }
+                ctx.fillText("<< PREV", leftX, arrY + 25);
+                ctx.shadowBlur = 0;
+            }
+
+            if (timesPage < maxTimesPages - 1) {
+                let rightX = canvas.width / 2 - 200;
+                activeUIButtons.push({ id: 'times_next', x: rightX, y: arrY, w: 120, h: 40 });
+                let isHover = typeof mouseX !== 'undefined' && mouseX > rightX && mouseX < rightX + 120 && mouseY > arrY && mouseY < arrY + 40;
+                ctx.fillStyle = isHover ? '#fff' : '#0ff';
+                if (isHover) { ctx.shadowBlur = 10; ctx.shadowColor = '#fff'; }
+                ctx.fillText("NEXT >>", rightX, arrY + 25);
+                ctx.shadowBlur = 0;
+            }
+
+            ctx.font = 'bold 24px monospace';
+            ctx.fillStyle = '#00ffcc';
+            ctx.fillText("FULL RUN RECORDS", canvas.width / 2 + 50, 240);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '20px monospace';
+
+            let rtaText = saveData.bestRTA !== null ? saveData.bestRTA.toFixed(3) + 's' : '--';
+            let igtText = saveData.bestIGT !== null ? saveData.bestIGT.toFixed(3) + 's' : '--';
+
+            let sumText = '--';
+            let hasAll = true;
+            let sumOfBests = 0;
+            for (let i = 0; i < levels.length; i++) {
+                if (saveData.bestLevels[i] === null || saveData.bestLevels[i] === undefined) {
+                    hasAll = false;
+                    break;
+                }
+                sumOfBests += saveData.bestLevels[i];
+            }
+            if (hasAll && levels.length > 0) {
+                sumText = sumOfBests.toFixed(3) + 's';
+            }
+
+            ctx.fillText(`BEST RTA     : ${rtaText}`, canvas.width / 2 + 50, 290);
+            ctx.fillText(`BEST IGT     : ${igtText}`, canvas.width / 2 + 50, 330);
+            ctx.fillText(`SUM OF BESTS : ${sumText}`, canvas.width / 2 + 50, 370);
+            ctx.fillText(`CASUAL RTA   : ${saveData.casualRTA ? saveData.casualRTA.toFixed(3) + 's' : '--'}`, canvas.width / 2 + 50, 410);
+            ctx.fillText(`CASUAL IGT   : ${saveData.casualIGT ? saveData.casualIGT.toFixed(3) + 's' : '--'}`, canvas.width / 2 + 50, 450);
+        } else if (timesTab === 1) {
+            ctx.textAlign = 'center';
+            let catX = canvas.width / 2 - 150;
+            let catY = 210;
+            activeUIButtons.push({ id: 'times_category', x: catX, y: catY, w: 300, h: 40 });
+            
+            let isHover = typeof mouseX !== 'undefined' && mouseX > catX && mouseX < catX + 300 && mouseY > catY && mouseY < catY + 40;
+            ctx.fillStyle = isHover ? '#fff' : '#0ff';
+            if (isHover) { ctx.shadowBlur = 10; ctx.shadowColor = '#fff'; }
+            ctx.font = 'bold 24px monospace';
+            ctx.fillText(`CATEGORY: < ${lbCategory.toUpperCase()} >`, canvas.width / 2, 240);
+            ctx.shadowBlur = 0;
+
+            let data = db.cache[lbCategory.toLowerCase()];
+            
+            ctx.font = '20px monospace';
+            ctx.textAlign = 'left';
+            if (!data) {
+                ctx.fillStyle = '#aaa';
+                ctx.fillText("Loading...", canvas.width / 2 - 50, 300);
+            } else if (data.length === 0) {
+                ctx.fillStyle = '#aaa';
+                ctx.fillText("No times submitted yet.", canvas.width / 2 - 150, 300);
+            } else {
+                ctx.fillStyle = '#fff';
+                ctx.fillText("Rank  Username             RTA        IGT", canvas.width / 2 - 350, 280);
+                for (let i = 0; i < Math.min(10, data.length); i++) {
+                    let run = data[i];
+                    ctx.fillText(`#${i+1}`.padEnd(6) + run.username.padEnd(21) + parseFloat(run.rta).toFixed(3).padEnd(11) + parseFloat(run.igt).toFixed(3), canvas.width / 2 - 350, 315 + i * 25);
+                }
+            }
+        } else if (timesTab === 2) {
+            ctx.textAlign = 'center';
+            let boxX = canvas.width / 2 - 120;
+            let boxY = 220;
+            let boxW = 240;
+            let boxH = 40;
+            
+            activeUIButtons.push({ id: 'il_level_input', x: boxX, y: boxY, w: boxW, h: boxH });
+            let isHoverBox = typeof mouseX !== 'undefined' && mouseX >= boxX && mouseX <= boxX + boxW && mouseY >= boxY && mouseY <= boxY + boxH;
+
+            ctx.fillStyle = isHoverBox ? 'rgba(0, 255, 255, 0.1)' : 'rgba(0, 5, 10, 0.8)';
+            ctx.fillRect(boxX, boxY, boxW, boxH);
+            ctx.strokeStyle = isHoverBox ? '#0ff' : '#334155';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+            ctx.fillStyle = '#fff';
+            let displayInput = "LEVEL: " + (typeof lbLevelInput !== 'undefined' && lbLevelInput !== "" ? lbLevelInput : (lbLevel + 1));
+            displayInput += (Math.floor(Date.now() / 500) % 2 === 0 ? '_' : ' ');
+            ctx.fillText(displayInput, canvas.width / 2, boxY + 28);
+
+            let data = db.cache.il[lbLevel];
+            
+            ctx.font = '20px monospace';
+            ctx.textAlign = 'left';
+            if (!data) {
+                ctx.fillStyle = '#aaa';
+                ctx.fillText("Loading...", canvas.width / 2 - 50, 300);
+            } else if (data.length === 0) {
+                ctx.fillStyle = '#aaa';
+                ctx.fillText("No times submitted yet.", canvas.width / 2 - 150, 300);
+            } else {
+                ctx.fillStyle = '#fff';
+                ctx.fillText("Rank  Username             Time", canvas.width / 2 - 250, 280);
+                for (let i = 0; i < Math.min(10, data.length); i++) {
+                    let run = data[i];
+                    ctx.fillText(`#${i+1}`.padEnd(6) + run.username.padEnd(21) + parseFloat(run.rta).toFixed(3), canvas.width / 2 - 250, 315 + i * 25);
+                }
+            }
         }
 
-        let backY = 550;
-        const isBackHover = mouseX > canvas.width / 2 - 100 && mouseX < canvas.width / 2 + 100 &&
-            mouseY > backY && mouseY < backY + 50;
+        drawUIButton('back_times', 'BACK', canvas.width / 2 - 100, 550, 200, 50, 'danger');
 
-        ctx.fillStyle = isBackHover ? 'rgba(255, 0, 0, 0.1)' : 'rgba(0, 0, 0, 0.5)';
-        ctx.fillRect(canvas.width / 2 - 100, backY, 200, 50);
-
-        ctx.strokeStyle = isBackHover ? '#f00' : '#334155';
-        ctx.lineWidth = 4;
-        ctx.strokeRect(canvas.width / 2 - 100, backY, 200, 50);
-
-        ctx.fillStyle = isBackHover ? '#f00' : '#fff';
-        if (isBackHover) {
-            ctx.shadowBlur = 10;
-            ctx.shadowColor = '#f00';
-        }
-        ctx.textAlign = 'center';
-        ctx.fillText("BACK", canvas.width / 2, backY + 32);
-        ctx.shadowBlur = 0;
-
-    } else if (menuScreen === 'save') {
+    } else if (menuScreen === 'saveload') {
+        let cx = canvas.width / 2;
         ctx.textAlign = 'center';
         ctx.font = 'bold 48px monospace';
         ctx.fillStyle = '#fff';
         ctx.shadowBlur = 20;
         ctx.shadowColor = '#0ff';
-        ctx.fillText("SAVE DATA", canvas.width / 2, 180);
+        ctx.fillText("SAVE / LOAD DATA", cx, 110);
         ctx.shadowBlur = 0;
 
-        ctx.fillStyle = 'rgba(0, 5, 10, 0.8)';
-        ctx.strokeStyle = '#334155';
+        // Save Box
+        let sBoxX = cx - 400;
+        let sBoxY = 150;
+        let sBoxW = 800;
+        let sBoxH = 120;
+        
+        activeUIButtons.push({ id: 'copy_save', x: sBoxX, y: sBoxY, w: sBoxW, h: sBoxH });
+        let isHoverSave = typeof mouseX !== 'undefined' && mouseX >= sBoxX && mouseX <= sBoxX + sBoxW && mouseY >= sBoxY && mouseY <= sBoxY + sBoxH;
+
+        ctx.fillStyle = isHoverSave ? 'rgba(0, 255, 255, 0.1)' : 'rgba(0, 5, 10, 0.8)';
+        ctx.fillRect(sBoxX, sBoxY, sBoxW, sBoxH);
+        
+        ctx.strokeStyle = isHoverSave ? '#0ff' : '#334155';
         ctx.lineWidth = 4;
-        ctx.fillRect(canvas.width / 2 - 400, 250, 800, 150);
-        ctx.strokeRect(canvas.width / 2 - 400, 250, 800, 150);
+        ctx.strokeRect(sBoxX, sBoxY, sBoxW, sBoxH);
 
         ctx.font = '20px monospace';
         ctx.fillStyle = '#00ffcc';
-        ctx.fillText("KEEP THIS CODE SAFE TO RESTORE YOUR PROGRESS", canvas.width / 2, 290);
+        ctx.fillText("COPY YOUR SAVE CODE", cx, 190);
 
         ctx.font = '16px monospace';
         ctx.fillStyle = '#fff';
-
         let displayCode = generatedSaveCode;
         if (displayCode.length > 80) displayCode = "..." + displayCode.substring(displayCode.length - 80);
-        ctx.fillText(displayCode, canvas.width / 2, 340);
+        ctx.fillText(displayCode, cx, 230);
 
         if (saveCopyStatus) {
             ctx.fillStyle = '#0f0';
-            ctx.fillText(saveCopyStatus, canvas.width / 2, 430);
+            ctx.fillText(saveCopyStatus, cx, 260);
         } else {
             ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-            ctx.fillText("(Click inside box to copy)", canvas.width / 2, 430);
+            ctx.fillText("(Click box to copy)", cx, 260);
         }
 
-        let backY = 550;
-        const isBackHover = mouseX > canvas.width / 2 - 100 && mouseX < canvas.width / 2 + 100 &&
-            mouseY > backY && mouseY < backY + 50;
+        // Load Box
+        let lBoxX = cx - 400;
+        let lBoxY = 320;
+        let lBoxW = 800;
+        let lBoxH = 120;
 
-        ctx.fillStyle = isBackHover ? 'rgba(255, 0, 0, 0.1)' : 'rgba(0, 0, 0, 0.5)';
-        ctx.fillRect(canvas.width / 2 - 100, backY, 200, 50);
-
-        ctx.strokeStyle = isBackHover ? '#f00' : '#334155';
+        ctx.fillStyle = 'rgba(0, 5, 10, 0.8)';
+        ctx.strokeStyle = '#334155';
         ctx.lineWidth = 4;
-        ctx.strokeRect(canvas.width / 2 - 100, backY, 200, 50);
+        ctx.fillRect(lBoxX, lBoxY, lBoxW, lBoxH);
+        ctx.strokeRect(lBoxX, lBoxY, lBoxW, lBoxH);
 
-        ctx.fillStyle = isBackHover ? '#f00' : '#fff';
-        if (isBackHover) {
-            ctx.shadowBlur = 10;
-            ctx.shadowColor = '#f00';
+        ctx.font = '20px monospace';
+        ctx.fillStyle = '#00ffcc';
+        ctx.fillText("PASTE CODE AND PRESS ENTER (CTRL+V / CMD+V)", cx, 360);
+
+        ctx.font = '16px monospace';
+        ctx.fillStyle = '#fff';
+        let displayInput = loadInput + (Math.floor(Date.now() / 500) % 2 === 0 ? '_' : ' ');
+        if (displayInput.length > 80) displayInput = "..." + displayInput.substring(displayInput.length - 80);
+        ctx.fillText(displayInput, cx, 400);
+
+        if (loadStatus) {
+            ctx.fillStyle = loadStatus.includes("SUCCESS") ? '#0f0' : '#f00';
+            ctx.fillText(loadStatus, cx, 430);
         }
-        ctx.textAlign = 'center';
-        ctx.font = 'bold 24px monospace';
-        ctx.fillText("BACK", canvas.width / 2, backY + 32);
-        ctx.shadowBlur = 0;
-    } else if (menuScreen === 'load') {
+
+        drawUIButton('back_saveload', 'BACK', cx - 100, 500, 200, 50, 'danger');
+    } else if (menuScreen === 'profile') {
+        let cx = canvas.width / 2;
         ctx.textAlign = 'center';
         ctx.font = 'bold 48px monospace';
         ctx.fillStyle = '#fff';
         ctx.shadowBlur = 20;
         ctx.shadowColor = '#0ff';
-        ctx.fillText("LOAD DATA", canvas.width / 2, 180);
+        ctx.fillText("PLAYER PROFILE", cx, 110);
         ctx.shadowBlur = 0;
 
+        ctx.font = '24px monospace';
+        ctx.fillStyle = '#aaa';
+        
+        ctx.fillText(`STATUS: ${saveData.isAnonymous ? 'ANONYMOUS' : 'REGISTERED'}`, cx, 180);
+        if (!saveData.isAnonymous) {
+            let pidStr = `PLAYER ID: ${saveData.playerId}`;
+            let w = ctx.measureText(pidStr).width;
+            let h = 30;
+            let x = cx - w / 2;
+            let y = 195;
+            
+            activeUIButtons.push({ id: 'copy_player_id', x: x, y: y, w: w, h: h });
+            
+            let isHover = typeof mouseX !== 'undefined' && mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h;
+            if (isHover) {
+                ctx.fillStyle = 'rgba(0, 255, 255, 0.2)';
+                ctx.fillRect(x - 10, y, w + 20, h);
+                ctx.fillStyle = '#fff';
+            }
+            
+            ctx.fillText(pidStr, cx, 220);
+            
+            ctx.fillStyle = '#aaa'; // restore color
+        }
+        ctx.fillText(`USERNAME: ${saveData.username || 'N/A'}`, cx, 260);
+        
+        ctx.fillStyle = '#0ff';
+        ctx.fillText(`CAMPAIGN PROGRESS: Level ${saveData.campaignProgress}`, cx, 320);
+        
+        let displayRTA = saveData.bestRTA ? parseFloat(saveData.bestRTA).toFixed(3) + 's' : 'N/A';
+        ctx.fillText(`BEST SPEEDRUN RTA: ${displayRTA}`, cx, 360);
+
+        // Input Box
+        let boxX = cx - 200;
+        let boxY = 400;
+        let boxW = 400;
+        let boxH = 50;
+        
         ctx.fillStyle = 'rgba(0, 5, 10, 0.8)';
         ctx.strokeStyle = '#334155';
         ctx.lineWidth = 4;
-        ctx.fillRect(canvas.width / 2 - 400, 250, 800, 150);
-        ctx.strokeRect(canvas.width / 2 - 400, 250, 800, 150);
+        ctx.fillRect(boxX, boxY, boxW, boxH);
+        ctx.strokeRect(boxX, boxY, boxW, boxH);
 
         ctx.font = '20px monospace';
-        ctx.fillStyle = '#00ffcc';
-        ctx.fillText("PASTE YOUR CODE AND PRESS ENTER (CTRL+V / CMD+V)", canvas.width / 2, 290);
-
-        ctx.font = '16px monospace';
         ctx.fillStyle = '#fff';
+        let displayInput = (typeof profileInput !== 'undefined' ? profileInput : "") + (Math.floor(Date.now() / 500) % 2 === 0 ? '_' : ' ');
+        ctx.fillText(displayInput, cx, boxY + 32);
 
-        let displayInput = loadInput + (Math.floor(Date.now() / 500) % 2 === 0 ? '_' : ' ');
-        if (displayInput.length > 80) displayInput = "..." + displayInput.substring(displayInput.length - 80);
+        drawUIButton('update_profile', saveData.isAnonymous ? 'CREATE PROFILE' : 'UPDATE USERNAME', cx - 150, 470, 300, 50);
 
-        ctx.fillText(displayInput, canvas.width / 2, 340);
-
-        if (loadStatus) {
-            ctx.fillStyle = loadStatus.includes("SUCCESS") ? '#0f0' : '#f00';
-            ctx.fillText(loadStatus, canvas.width / 2, 430);
+        if (typeof profileStatus !== 'undefined' && profileStatus) {
+            ctx.fillStyle = profileStatus.includes("SUCCESS") ? '#0f0' : '#f00';
+            ctx.fillText(profileStatus, cx, 550);
         }
 
-        let backY = 550;
-        const isBackHover = mouseX > canvas.width / 2 - 100 && mouseX < canvas.width / 2 + 100 &&
-            mouseY > backY && mouseY < backY + 50;
-
-        ctx.fillStyle = isBackHover ? 'rgba(255, 0, 0, 0.1)' : 'rgba(0, 0, 0, 0.5)';
-        ctx.fillRect(canvas.width / 2 - 100, backY, 200, 50);
-
-        ctx.strokeStyle = isBackHover ? '#f00' : '#334155';
-        ctx.lineWidth = 4;
-        ctx.strokeRect(canvas.width / 2 - 100, backY, 200, 50);
-
-        ctx.fillStyle = isBackHover ? '#f00' : '#fff';
-        if (isBackHover) {
-            ctx.shadowBlur = 10;
-            ctx.shadowColor = '#f00';
-        }
-        ctx.textAlign = 'center';
-        ctx.font = 'bold 24px monospace';
-        ctx.fillText("BACK", canvas.width / 2, backY + 32);
-        ctx.shadowBlur = 0;
+        drawUIButton('back_profile', 'BACK', cx - 250, 580, 200, 50, 'danger');
+        drawUIButton('logout_profile', 'LOG OUT', cx + 50, 580, 200, 50, 'danger');
     } else if (menuScreen === 'settings') {
         ctx.textAlign = 'center';
         ctx.font = 'bold 48px monospace';
@@ -4778,18 +5552,26 @@ function drawMenuUI() {
         ctx.shadowColor = '#0ff';
         ctx.fillText("SETTINGS", canvas.width / 2, 120);
         ctx.shadowBlur = 0;
-        function drawSettingOption(y, label, value, isHover, isSlider = false) {
-            ctx.fillStyle = isHover ? 'rgba(0, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.5)';
-            ctx.fillRect(canvas.width / 2 - 250, y, 500, 50);
 
-            if (isSlider) {
-                ctx.fillStyle = isHover ? 'rgba(0, 255, 255, 0.3)' : 'rgba(255, 255, 255, 0.2)';
-                ctx.fillRect(canvas.width / 2 - 250, y, 500 * value, 50);
+        function drawUISlider(id, label, value, x, y, w, h) {
+            activeUIButtons.push({ id, x, y, w, h, isSlider: true });
+            
+            let isHover = false;
+            if (typeof mouseX !== 'undefined' && typeof mouseY !== 'undefined') {
+                if (mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h) {
+                    isHover = true;
+                }
             }
+
+            ctx.fillStyle = isHover ? 'rgba(0, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(x, y, w, h);
+
+            ctx.fillStyle = isHover ? 'rgba(0, 255, 255, 0.3)' : 'rgba(255, 255, 255, 0.2)';
+            ctx.fillRect(x, y, w * value, h);
 
             ctx.strokeStyle = isHover ? '#0ff' : '#334155';
             ctx.lineWidth = 4;
-            ctx.strokeRect(canvas.width / 2 - 250, y, 500, 50);
+            ctx.strokeRect(x, y, w, h);
 
             ctx.fillStyle = isHover ? '#0ff' : '#fff';
             if (isHover) {
@@ -4797,65 +5579,35 @@ function drawMenuUI() {
                 ctx.shadowColor = '#0ff';
             }
 
-            let displayVal = isSlider ? `${Math.round(value * 100)}%` : value;
-            ctx.fillText(`${label}: ${displayVal}`, canvas.width / 2, y + 32);
+            ctx.font = 'bold 24px monospace';
+            ctx.fillText(`${label}: ${Math.round(value * 100)}%`, x + w / 2, y + h / 2 + 8);
             ctx.shadowBlur = 0;
         }
 
-        ctx.font = 'bold 24px monospace';
+        let bw = 350;
+        let bh = 50;
+        let cx = canvas.width / 2;
+        let col1X = cx - 370;
+        let col2X = cx + 20;
 
-        let t1Y = 170;
-        let t1H = mouseX > canvas.width / 2 - 250 && mouseX < canvas.width / 2 + 250 && mouseY > t1Y && mouseY < t1Y + 50;
-        drawSettingOption(t1Y, 'SPEEDRUN MODE', isSpeedrunMode ? 'ON' : 'OFF', t1H);
-
-        let t2Y = 225;
-        let t2H = mouseX > canvas.width / 2 - 250 && mouseX < canvas.width / 2 + 250 && mouseY > t2Y && mouseY < t2Y + 50;
-        drawSettingOption(t2Y, 'VISUAL EFFECTS', saveData.visualEffects.toUpperCase(), t2H);
-
-        let t3Y = 280;
-        let t3H = mouseX > canvas.width / 2 - 250 && mouseX < canvas.width / 2 + 250 && mouseY > t3Y && mouseY < t3Y + 50;
-        drawSettingOption(t3Y, 'SHOW TIMER', saveData.showTimer ? 'ON' : 'OFF', t3H);
-
-        let t4Y = 335;
-        let t4H = mouseX > canvas.width / 2 - 250 && mouseX < canvas.width / 2 + 250 && mouseY > t4Y && mouseY < t4Y + 50;
-        drawSettingOption(t4Y, 'SHOW FPS', saveData.showFPS ? 'ON' : 'OFF', t4H);
-
-        let t5Y = 390;
-        let t5H = mouseX > canvas.width / 2 - 250 && mouseX < canvas.width / 2 + 250 && mouseY > t5Y && mouseY < t5Y + 50;
-        drawSettingOption(t5Y, 'MASTER VOLUME', saveData.masterVolume, t5H, true);
-
-        let t6Y = 445;
-        let t6H = mouseX > canvas.width / 2 - 250 && mouseX < canvas.width / 2 + 250 && mouseY > t6Y && mouseY < t6Y + 50;
-        drawSettingOption(t6Y, 'EFFECTS VOLUME', saveData.effectsVolume, t6H, true);
-
-        let t7Y = 500;
-        let t7H = mouseX > canvas.width / 2 - 250 && mouseX < canvas.width / 2 + 250 && mouseY > t7Y && mouseY < t7Y + 50;
-        drawSettingOption(t7Y, 'MUSIC VOLUME', saveData.musicVolume, t7H, true);
+        // Column 1: Visuals & Gameplay
+        drawUIButton('speedrun_mode', `SPEEDRUN MODE: ${isSpeedrunMode ? 'ON' : 'OFF'}`, col1X, 170, bw, bh);
+        drawUIButton('visual_effects', `VISUALS: ${saveData.visualEffects.toUpperCase()}`, col1X, 235, bw, bh);
+        drawUIButton('show_timer', `SHOW TIMER: ${saveData.showTimer ? 'ON' : 'OFF'}`, col1X, 300, bw, bh);
+        drawUIButton('show_fps', `SHOW FPS: ${saveData.showFPS ? 'ON' : 'OFF'}`, col1X, 365, bw, bh);
 
         if (easterEggUnlocked) {
-            let t8Y = 555;
-            let t8H = mouseX > canvas.width / 2 - 250 && mouseX < canvas.width / 2 + 250 && mouseY > t8Y && mouseY < t8Y + 50;
-            drawSettingOption(t8Y, 'TERMINAL SPEEDRUN', allowTerminalInSpeedrun ? 'ON' : 'OFF', t8H);
+            drawUIButton('terminal_speedrun', `TERMINAL SPEEDRUN: ${allowTerminalInSpeedrun ? 'ON' : 'OFF'}`, col1X, 430, bw, bh);
         }
 
-        let backY = 620;
-        const isBackHover = mouseX > canvas.width / 2 - 100 && mouseX < canvas.width / 2 + 100 &&
-            mouseY > backY && mouseY < backY + 50;
+        // Column 2: Audio & Testing
+        drawUISlider('master_volume', 'MASTER VOLUME', saveData.masterVolume, col2X, 170, bw, bh);
+        drawUISlider('effects_volume', 'EFFECTS VOLUME', saveData.effectsVolume, col2X, 235, bw, bh);
+        drawUISlider('music_volume', 'MUSIC VOLUME', saveData.musicVolume, col2X, 300, bw, bh);
+        
+        drawUIButton('test_server', `TEST SERVER: ${serverTestStatus}`, col2X, 365, bw, bh);
 
-        ctx.fillStyle = isBackHover ? 'rgba(255, 0, 0, 0.1)' : 'rgba(0, 0, 0, 0.5)';
-        ctx.fillRect(canvas.width / 2 - 100, backY, 200, 50);
-
-        ctx.strokeStyle = isBackHover ? '#f00' : '#334155';
-        ctx.lineWidth = 4;
-        ctx.strokeRect(canvas.width / 2 - 100, backY, 200, 50);
-
-        ctx.fillStyle = isBackHover ? '#f00' : '#fff';
-        if (isBackHover) {
-            ctx.shadowBlur = 10;
-            ctx.shadowColor = '#f00';
-        }
-        ctx.fillText("BACK", canvas.width / 2, backY + 32);
-        ctx.shadowBlur = 0;
+        drawUIButton('back_settings', 'BACK', canvas.width / 2 - 100, 600, 200, 50, 'danger');
     }
 }
 
@@ -5389,18 +6141,31 @@ if (state === 'victory') {
     ctx.fillText("MISSION COMPLETE", canvas.width / 2, 180);
     ctx.shadowBlur = 0;
 
-    if (victoryData.invalid) {
+    if (cheatsEnabled || customFinalLevel !== null) {
+        ctx.font = 'bold 32px monospace';
+        ctx.fillStyle = '#fff';
+        ctx.fillText("RUN INVALIDATED", canvas.width / 2, 250);
+
+        ctx.font = '20px monospace';
+        ctx.fillStyle = '#ff5555';
+        ctx.fillText("Cheats or Custom Level used. No Leaderboard Submission.", canvas.width / 2, 280);
+    } else if (victoryData.invalid) {
+        // Invalid means casual mode but no cheats
         ctx.font = 'bold 32px monospace';
         ctx.fillStyle = '#fff';
         ctx.fillText("CASUAL CLEAR", canvas.width / 2, 250);
 
         ctx.font = '20px monospace';
-        ctx.fillStyle = '#ff5555';
-        ctx.fillText("Run Not Eligible for Speedrun Leaderboard.", canvas.width / 2, 280);
+        ctx.fillStyle = '#55ff55';
+        ctx.fillText("Eligible for Casual Leaderboard.", canvas.width / 2, 280);
     } else {
         ctx.font = 'bold 32px monospace';
         ctx.fillStyle = '#fff';
-        ctx.fillText("FULL RUN CLEAR", canvas.width / 2, 250);
+        ctx.fillText("SPEEDRUN CLEAR", canvas.width / 2, 250);
+        
+        ctx.font = '20px monospace';
+        ctx.fillStyle = '#55ff55';
+        ctx.fillText("Eligible for Speedrun Leaderboard.", canvas.width / 2, 280);
     }
 
     ctx.fillStyle = 'rgba(0, 10, 20, 0.8)';
