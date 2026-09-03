@@ -4619,11 +4619,28 @@ function update(dt) {
                                     storeSaveData();
 
                                     if (isFinalLevel) {
+                                        let sumBest = 0;
+                                        let hasAllBest = true;
+                                        let targetLvl = customFinalLevel !== null ? customFinalLevel : (levels.length - 1);
+                                        for (let i = 0; i <= targetLvl; i++) {
+                                            let b = saveData.bestLevels[i];
+                                            if (b === null || b === undefined) {
+                                                hasAllBest = false;
+                                                break;
+                                            }
+                                            sumBest += b;
+                                        }
+
+                                        let runImpossible = false;
+                                        if (!hasAllBest || currentRunIGT < (sumBest - 0.05) || currentRunRTA < (sumBest - 0.05)) {
+                                            runImpossible = true;
+                                        }
+
                                         victoryData.rta = currentRunRTA;
                                         victoryData.igt = currentRunIGT;
-                                        victoryData.invalid = runInvalidated;
+                                        victoryData.invalid = runInvalidated || runImpossible;
 
-                                        if (!runInvalidated) {
+                                        if (!runInvalidated && !runImpossible) {
                                             victoryData.newRTA = (saveData.bestRTA === null || currentRunRTA < saveData.bestRTA);
                                             victoryData.newIGT = (saveData.bestIGT === null || currentRunIGT < saveData.bestIGT);
 
@@ -4638,7 +4655,7 @@ function update(dt) {
                                         } else {
                                             victoryData.newRTA = false;
                                             victoryData.newIGT = false;
-                                            if (typeof db !== 'undefined' && !cheatsEnabled && customFinalLevel === null) {
+                                            if (typeof db !== 'undefined' && !cheatsEnabled && customFinalLevel === null && !runImpossible) {
                                                 db.submitRun('Casual', currentRunRTA, currentRunIGT);
                                             }
                                         }
