@@ -1226,6 +1226,39 @@ function loadSaveData() {
                     needsUpdate = true;
                 }
 
+                // Purge impossible times from local storage
+                let sumBest = 0;
+                let hasAllBest = true;
+                for (let i = 0; i < levels.length; i++) {
+                    let b = saveData.bestLevels[i];
+                    if (b === null || b === undefined) {
+                        hasAllBest = false;
+                        break;
+                    }
+                    sumBest += b;
+                }
+
+                if (!hasAllBest) {
+                    if (saveData.bestRTA !== null || saveData.bestIGT !== null || saveData.casualRTA !== null || saveData.casualIGT !== null) {
+                        saveData.bestRTA = null;
+                        saveData.bestIGT = null;
+                        saveData.casualRTA = null;
+                        saveData.casualIGT = null;
+                        needsUpdate = true;
+                    }
+                } else {
+                    if (saveData.bestIGT !== null && saveData.bestIGT < (sumBest - 0.05)) {
+                        saveData.bestRTA = null;
+                        saveData.bestIGT = null;
+                        needsUpdate = true;
+                    }
+                    if (saveData.casualIGT !== null && saveData.casualIGT < (sumBest - 0.05)) {
+                        saveData.casualRTA = null;
+                        saveData.casualIGT = null;
+                        needsUpdate = true;
+                    }
+                }
+
                 if (needsUpdate) {
                     storeSaveData();
                 }
