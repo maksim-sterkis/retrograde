@@ -3439,7 +3439,7 @@ window.addEventListener('keyup', e => {
     const key = e.key.toLowerCase();
     keys[key] = false;
 
-    if (key === 't') {
+    if (key === 't' || key === '`' || key === '~') {
         if (!terminalActive && state === 'menu' && menuScreen === 'main' && !tTriggeredReset) {
             if (isSpeedrunMode && !allowTerminalInSpeedrun) {
                 // Terminal blocked in speedrun mode without the hidden setting
