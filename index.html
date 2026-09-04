@@ -5413,7 +5413,7 @@ function drawMenuUI() {
                 ctx.fillText("Rank  Username             RTA        IGT", canvas.width / 2 - 350, 280);
                 for (let i = 0; i < Math.min(10, data.length); i++) {
                     let run = data[i];
-                    ctx.fillText(`#${i+1}`.padEnd(6) + run.username.padEnd(21) + parseFloat(run.rta).toFixed(3).padEnd(11) + parseFloat(run.igt).toFixed(3), canvas.width / 2 - 350, 315 + i * 25);
+                    ctx.fillText(`#${i+1}`.padEnd(6) + run.username.padEnd(21) + parseFloat(run.rta).toFixed(3).padEnd(11) + parseFloat(run.igt).toFixed(3), canvas.width / 2 - 350, 315 + i * 22);
                 }
             }
         } else if (timesTab === 2) {
@@ -5452,7 +5452,7 @@ function drawMenuUI() {
                 ctx.fillText("Rank  Username             Time", canvas.width / 2 - 250, 280);
                 for (let i = 0; i < Math.min(10, data.length); i++) {
                     let run = data[i];
-                    ctx.fillText(`#${i+1}`.padEnd(6) + run.username.padEnd(21) + parseFloat(run.rta).toFixed(3), canvas.width / 2 - 250, 315 + i * 25);
+                    ctx.fillText(`#${i+1}`.padEnd(6) + run.username.padEnd(21) + parseFloat(run.rta).toFixed(3), canvas.width / 2 - 250, 315 + i * 22);
                 }
             }
         }
